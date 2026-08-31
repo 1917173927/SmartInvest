@@ -38,10 +38,11 @@ use_chronos = true
 sync_lookback_years = 5
 evidence_dirs = ["07-研究资料"]
 auto_calibrate = true
-calibration_horizons = [20]
+calibration_horizons = [5, 10, 20, 60, 120]
 calibration_max_windows = 100
 calibration_step = 1
 calibration_cooldown_days = 7
+calibration_jobs_per_run = 1
 news_refresh_hours = 12
 macro_refresh_hours = 24
 max_runtime_minutes = 20
@@ -59,6 +60,10 @@ include_volume = true
 include_levels = true
 level_lookback_sessions = 360
 level_max_per_side = 2
+validate_levels = true
+level_validation_horizon = 20
+level_validation_step = 10
+level_validation_max_windows = 60
 include_probability_fan = true
 
 # 复制本段增加自己的标的。真实配置被 .gitignore 排除。

@@ -74,6 +74,38 @@ def test_akshare_uses_tencent_when_eastmoney_fails(monkeypatch) -> None:
     assert bars[0].source == "akshare-tencent"
 
 
+def test_akshare_converts_per_ten_share_corporate_actions(monkeypatch) -> None:
+    class FakeAkShare:
+        @staticmethod
+        def stock_fhps_detail_em(**_kwargs):
+            return pd.DataFrame(
+                [
+                    {
+                        "除权除息日": "2005-09-09",
+                        "送转股份-送股比例": 0,
+                        "送转股份-转股比例": 10,
+                        "现金分红-现金分红比例": 15,
+                    },
+                    {
+                        "除权除息日": "2009-06-19",
+                        "送转股份-送股比例": 5,
+                        "送转股份-转股比例": 0,
+                        "现金分红-现金分红比例": 2,
+                    },
+                ]
+            )
+
+    monkeypatch.setitem(sys.modules, "akshare", FakeAkShare())
+    monkeypatch.setattr(AkShareProvider, "available", staticmethod(lambda: True))
+    actions = AkShareProvider().fetch_actions(
+        Instrument.parse("CN:000933"), date(2000, 1, 1), date(2010, 1, 1)
+    )
+    assert [(item.action_date, item.split_ratio, item.dividend) for item in actions] == [
+        (date(2005, 9, 9), 2.0, 1.5),
+        (date(2009, 6, 19), 1.5, 0.2),
+    ]
+
+
 def test_raw_prices_and_actions_produce_point_in_time_returns() -> None:
     bars = pd.DataFrame(
         [
@@ -100,7 +132,33 @@ def test_raw_prices_and_actions_produce_point_in_time_returns() -> None:
     assert result.iloc[1]["daily_return"] == 0
     assert result.iloc[2]["daily_return"] == 0
     assert result.iloc[-1]["total_return_index"] == 1
+    assert result.iloc[1]["return_anomaly_status"] == "corporate-action-adjusted"
     assert warnings == []
+
+
+def test_database_uses_one_action_source_per_date(tmp_path) -> None:
+    with Database(tmp_path / "analysis.sqlite3") as database:
+        database.upsert_actions(
+            [
+                CorporateAction(
+                    symbol="CN:000933",
+                    action_date=date(2005, 9, 9),
+                    dividend=1.5,
+                    split_ratio=2.0,
+                    source="akshare-corporate-actions",
+                ),
+                CorporateAction(
+                    symbol="CN:000933",
+                    action_date=date(2005, 9, 9),
+                    dividend=1.5,
+                    split_ratio=2.0,
+                    source="yfinance",
+                ),
+            ]
+        )
+        actions = database.load_actions("CN:000933")
+    assert len(actions) == 1
+    assert actions.iloc[0]["source"] == "akshare-corporate-actions"
 
 
 def test_database_filters_future_bars_and_documents(tmp_path) -> None:

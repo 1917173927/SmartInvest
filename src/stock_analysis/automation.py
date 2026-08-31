@@ -412,6 +412,8 @@ def run_automation(
             max_windows = int(automation.get("calibration_max_windows", target))
             step = int(automation.get("calibration_step", 1))
             cooldown_days = int(automation.get("calibration_cooldown_days", 7))
+            calibration_job_limit = max(1, int(automation.get("calibration_jobs_per_run", 1)))
+            calibration_jobs_run = 0
             for symbol in sync_ready:
                 bars = database.load_bars(symbol, analysis_date)
                 actions = database.load_actions(symbol, analysis_date)
@@ -439,6 +441,15 @@ def run_automation(
                             symbol=symbol,
                         )
                         continue
+                    if calibration_jobs_run >= calibration_job_limit:
+                        _task(
+                            summary,
+                            name=f"calibration-{days}d",
+                            status="skipped",
+                            reason=f"达到本次校准任务限额 {calibration_job_limit}",
+                            symbol=symbol,
+                        )
+                        continue
                     if time.monotonic() >= deadline:
                         _task(
                             summary,
@@ -449,6 +460,7 @@ def run_automation(
                         )
                         continue
                     try:
+                        calibration_jobs_run += 1
                         minimum_history = int(
                             config.section("forecast").get("minimum_history_days", 756)
                         )

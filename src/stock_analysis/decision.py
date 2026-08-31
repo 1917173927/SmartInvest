@@ -18,10 +18,12 @@ from stock_analysis.data import AppConfig, Database, DataQuality, FundamentalRec
 from stock_analysis.forecast import ForecastBundle, ModelStatus
 from stock_analysis.indicators import (
     PriceZone,
+    PriceZoneValidation,
     add_indicators,
     detect_price_zones,
     macro_assessments,
     macro_exposures,
+    validate_price_zones,
 )
 from stock_analysis.research import ResearchResult
 
@@ -91,6 +93,7 @@ class AnalysisPackage(BaseModel):
     macro_score: float = 0.0
     chart_paths: list[str] = Field(default_factory=list)
     price_zones: list[PriceZone] = Field(default_factory=list)
+    price_zone_validation: list[PriceZoneValidation] = Field(default_factory=list)
 
 
 class PortfolioPosition(BaseModel):
@@ -670,6 +673,18 @@ def analyze_package(
         if bool(chart_config.get("include_levels", True))
         else []
     )
+    price_zone_validation = (
+        validate_price_zones(
+            frame,
+            as_of=as_of,
+            lookback_sessions=int(chart_config.get("level_lookback_sessions", 360)),
+            evaluation_horizon=int(chart_config.get("level_validation_horizon", 20)),
+            step=int(chart_config.get("level_validation_step", 10)),
+            max_windows=int(chart_config.get("level_validation_max_windows", 60)),
+        )
+        if price_zones and bool(chart_config.get("validate_levels", True))
+        else []
+    )
     decisions = build_decisions(
         config=config,
         forecasts=forecasts,
@@ -715,6 +730,7 @@ def analyze_package(
         macro=macro,
         macro_score=macro_score,
         price_zones=price_zones,
+        price_zone_validation=price_zone_validation,
     )
 
 
@@ -832,6 +848,41 @@ def render_analysis_markdown(package: AnalysisPackage) -> str:
                 "或趋势加速直接击穿。",
             ]
         )
+        if package.price_zone_validation:
+            lines.extend(
+                [
+                    "",
+                    "### 样本外检验",
+                    "",
+                    "| 类型 | 可检验窗口 | 实际触达 | 守住 | 守住率 | 95% 区间 | 状态 |",
+                    "|---|---:|---:|---:|---:|---:|---|",
+                ]
+            )
+            for validation in package.price_zone_validation:
+                label = "支撑" if validation.kind == "support" else "压力"
+                rate = (
+                    f"{validation.hold_rate:.0%}"
+                    if validation.hold_rate is not None
+                    else "—"
+                )
+                interval = (
+                    f"{validation.confidence_low:.0%}–{validation.confidence_high:.0%}"
+                    if validation.confidence_low is not None
+                    and validation.confidence_high is not None
+                    else "—"
+                )
+                status = "可参考" if validation.status == "validated" else "样本不足"
+                lines.append(
+                    f"| {label} | {validation.windows} | {validation.touched} | "
+                    f"{validation.held} | {rate} | {interval} | {status} |"
+                )
+            lines.extend(
+                [
+                    "",
+                    "> 检验严格使用每个历史截止点之前的数据重新识别区间；只有未来真正触达"
+                    "该区间的样本才进入守住率，少于 20 次触达不把百分比当作可靠概率。",
+                ]
+            )
     else:
         lines.append("- 历史枢轴不足，暂不生成支撑/压力区间。")
     lines.extend(

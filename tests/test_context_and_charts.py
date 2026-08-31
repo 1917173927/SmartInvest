@@ -15,6 +15,7 @@ from stock_analysis.indicators import (
     detect_price_zones,
     macro_assessments,
     macro_exposures,
+    validate_price_zones,
 )
 from stock_analysis.research import ResearchResult
 
@@ -91,6 +92,28 @@ def test_price_zones_are_point_in_time_bands() -> None:
     assert any(zone.kind == "support" for zone in past)
     assert any(zone.kind == "resistance" for zone in past)
     assert all(zone.low <= zone.center <= zone.high for zone in past)
+
+
+def test_price_zone_validation_is_walk_forward_and_reports_sample_status() -> None:
+    dates = pd.bdate_range("2023-01-01", periods=460)
+    close = 20 + np.sin(np.arange(460) / 4) * 2
+    frame = pd.DataFrame(
+        {
+            "trade_date": dates,
+            "open": close,
+            "high": close + 0.4,
+            "low": close - 0.4,
+            "close": close,
+            "volume": 1_000 + (np.arange(460) % 20) * 20,
+        }
+    )
+    cutoff = dates[419].date()
+    past = validate_price_zones(frame.iloc[:420], as_of=cutoff, step=5, max_windows=40)
+    with_future = validate_price_zones(frame, as_of=cutoff, step=5, max_windows=40)
+    assert past == with_future
+    assert {item.kind for item in past} == {"support", "resistance"}
+    assert all(item.held <= item.touched <= item.windows for item in past)
+    assert all(item.status in {"validated", "insufficient-samples"} for item in past)
 
 
 def test_news_requires_a_parseable_publication_date() -> None:

@@ -596,7 +596,24 @@ class Database:
         rows = self.connection.execute(
             f"SELECT * FROM corporate_actions WHERE {where} ORDER BY action_date", params
         ).fetchall()
-        return pd.DataFrame([dict(row) for row in rows])
+        frame = pd.DataFrame([dict(row) for row in rows])
+        if frame.empty:
+            return frame
+        # A single action can be reported by several providers.  Selecting one
+        # authoritative row per date avoids multiplying split ratios or adding
+        # the same dividend twice in the total-return calculation.
+        source_rank = {
+            "akshare-corporate-actions": 0,
+            "yfinance": 1,
+        }
+        frame["_source_rank"] = frame["source"].map(source_rank).fillna(5)
+        frame = frame.sort_values(
+            ["action_date", "_source_rank", "fetched_at"],
+            ascending=[True, True, False],
+        )
+        return frame.drop_duplicates("action_date", keep="first").drop(
+            columns="_source_rank"
+        ).reset_index(drop=True)
 
     def latest_fundamentals(self, symbol: str, as_of: date) -> dict[str, FundamentalRecord]:
         rows = self.connection.execute(
@@ -1143,7 +1160,53 @@ class AkShareProvider:
     def fetch_actions(
         self, instrument: Instrument, start: date, end: date
     ) -> list[CorporateAction]:
-        return []
+        if instrument.market is not Market.CN or not self.available():
+            return []
+        import akshare as ak
+
+        # Eastmoney's implementation history includes the ex-right date and
+        # per-10-share distribution terms.  The second endpoint is deliberately
+        # retained as a schema-compatible fallback because public data endpoints
+        # occasionally fail independently.
+        try:
+            frame = ak.stock_fhps_detail_em(symbol=instrument.code)
+            date_column = _find_column(frame, ["除权除息日", "除权日"])
+            bonus_column = _find_column(frame, ["送转股份-送股比例", "送股"])
+            transfer_column = _find_column(frame, ["送转股份-转股比例", "转增"])
+            dividend_column = _find_column(frame, ["现金分红-现金分红比例", "派息"])
+        except Exception:
+            frame = ak.stock_history_dividend_detail(symbol=instrument.code, indicator="分红")
+            date_column = _find_column(frame, ["除权除息日", "除权日"])
+            bonus_column = _find_column(frame, ["送股"])
+            transfer_column = _find_column(frame, ["转增"])
+            dividend_column = _find_column(frame, ["派息"])
+        if frame is None or frame.empty or not date_column:
+            return []
+        results: list[CorporateAction] = []
+        for _, row in frame.iterrows():
+            raw_date = pd.to_datetime(row[date_column], errors="coerce")
+            if pd.isna(raw_date):
+                continue
+            action_date = pd.Timestamp(raw_date).date()
+            if action_date < start or action_date > end:
+                continue
+            bonus = _number(row[bonus_column]) if bonus_column else 0.0
+            transfer = _number(row[transfer_column]) if transfer_column else 0.0
+            dividend_per_ten = _number(row[dividend_column]) if dividend_column else 0.0
+            split_ratio = 1.0 + max(0.0, bonus + transfer) / 10.0
+            dividend = max(0.0, dividend_per_ten) / 10.0
+            if math.isclose(split_ratio, 1.0) and math.isclose(dividend, 0.0):
+                continue
+            results.append(
+                CorporateAction(
+                    symbol=instrument.canonical,
+                    action_date=action_date,
+                    dividend=dividend,
+                    split_ratio=split_ratio,
+                    source="akshare-corporate-actions",
+                )
+            )
+        return results
 
     def fetch_fundamentals(self, instrument: Instrument, as_of: date) -> list[FundamentalRecord]:
         if instrument.market is not Market.CN or not self.available():
@@ -1572,13 +1635,19 @@ def total_return_frame(
         dividends.loc[common] = action_frame.loc[common, "dividend"].astype(float)
         split_values = action_frame.loc[common, "split_ratio"].astype(float).replace(0, 1)
         splits.loc[common] = split_values
+    frame["action_dividend"] = dividends
+    frame["action_split_ratio"] = splits
     previous = frame["close"].shift(1)
     frame["daily_return"] = ((frame["close"] * splits + dividends) / previous) - 1
     frame.loc[frame.index[0], "daily_return"] = 0.0
+    frame["return_anomaly_status"] = "normal"
+    action_applied = (splits != 1.0) | (dividends != 0.0)
+    frame.loc[action_applied, "return_anomaly_status"] = "corporate-action-adjusted"
     frame["total_return_index"] = (1 + frame["daily_return"].fillna(0)).cumprod()
     warnings: list[str] = []
     unexplained = frame["daily_return"].abs() > 0.35
     if unexplained.any():
+        frame.loc[unexplained, "return_anomaly_status"] = "unresolved"
         dates = [timestamp.date().isoformat() for timestamp in frame.index[unexplained][:5]]
         warnings.append("发现超过 35% 的单日变动，可能缺少拆股/分红事件: " + ", ".join(dates))
     return frame.reset_index(drop=True), warnings

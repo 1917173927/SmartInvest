@@ -22,6 +22,111 @@ class PriceZone:
     distance: float
 
 
+@dataclass(frozen=True)
+class PriceZoneValidation:
+    kind: str
+    windows: int
+    touched: int
+    held: int
+    hold_rate: float | None
+    confidence_low: float | None
+    confidence_high: float | None
+    status: str
+
+
+def _wilson_interval(successes: int, trials: int) -> tuple[float | None, float | None]:
+    if trials <= 0:
+        return None, None
+    z = 1.96
+    proportion = successes / trials
+    denominator = 1 + z**2 / trials
+    center = (proportion + z**2 / (2 * trials)) / denominator
+    margin = z * math.sqrt(
+        proportion * (1 - proportion) / trials + z**2 / (4 * trials**2)
+    ) / denominator
+    return max(0.0, center - margin), min(1.0, center + margin)
+
+
+def validate_price_zones(
+    frame: pd.DataFrame,
+    *,
+    as_of: date | None = None,
+    lookback_sessions: int = 360,
+    evaluation_horizon: int = 20,
+    step: int = 10,
+    max_windows: int = 60,
+) -> list[PriceZoneValidation]:
+    """Walk-forward test whether previously detected zones held after a touch.
+
+    Every zone is computed using rows available at its cutoff. A support breaks
+    after two consecutive closes below its lower edge; resistance breaks after
+    two consecutive closes above its upper edge. Untouched zones are reported
+    but excluded from the empirical hold rate.
+    """
+    if frame.empty:
+        return []
+    data = frame.copy()
+    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
+    data = data.dropna(subset=["trade_date"]).sort_values("trade_date").reset_index(drop=True)
+    if as_of is not None:
+        data = data[data["trade_date"].dt.date <= as_of].reset_index(drop=True)
+    minimum_context = min(180, lookback_sessions)
+    last_cutoff = len(data) - evaluation_horizon - 1
+    if last_cutoff < minimum_context - 1:
+        return []
+    cutoffs = list(range(minimum_context - 1, last_cutoff + 1, max(1, step)))[-max_windows:]
+    results = {
+        "support": {"windows": 0, "touched": 0, "held": 0},
+        "resistance": {"windows": 0, "touched": 0, "held": 0},
+    }
+    for cutoff in cutoffs:
+        history = data.iloc[: cutoff + 1]
+        cutoff_date = pd.Timestamp(history.iloc[-1]["trade_date"]).date()
+        zones = detect_price_zones(
+            history,
+            as_of=cutoff_date,
+            lookback_sessions=lookback_sessions,
+            max_per_side=1,
+        )
+        future = data.iloc[cutoff + 1 : cutoff + 1 + evaluation_horizon]
+        for kind in ("support", "resistance"):
+            zone = next((item for item in zones if item.kind == kind), None)
+            if zone is None:
+                continue
+            bucket = results[kind]
+            bucket["windows"] += 1
+            if kind == "support":
+                touched = bool((future["low"].astype(float) <= zone.high).any())
+                beyond = future["close"].astype(float) < zone.low
+            else:
+                touched = bool((future["high"].astype(float) >= zone.low).any())
+                beyond = future["close"].astype(float) > zone.high
+            if not touched:
+                continue
+            bucket["touched"] += 1
+            broken = bool((beyond & beyond.shift(1, fill_value=False)).any())
+            if not broken:
+                bucket["held"] += 1
+    validations: list[PriceZoneValidation] = []
+    for kind, bucket in results.items():
+        touched = bucket["touched"]
+        held = bucket["held"]
+        low, high = _wilson_interval(held, touched)
+        validations.append(
+            PriceZoneValidation(
+                kind=kind,
+                windows=bucket["windows"],
+                touched=touched,
+                held=held,
+                hold_rate=held / touched if touched else None,
+                confidence_low=low,
+                confidence_high=high,
+                status="validated" if touched >= 20 else "insufficient-samples",
+            )
+        )
+    return validations
+
+
 def detect_price_zones(
     frame: pd.DataFrame,
     *,
