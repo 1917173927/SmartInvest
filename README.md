@@ -82,7 +82,7 @@ LLM 只能生成白名单事件，且事件生效日不得早于证据发布日�
 - `stock analyze SYMBOL --horizon short|medium|long|value|all`：生成分析与预测回执。
 - `stock portfolio`：读取最新 `01-持仓/*-持仓快照.md`，检查仓位、行业和现金硬约束。
 - `stock evaluate`：核对到期回执。
-- `stock auto`：无交互执行“依赖检查 → 条件同步/补缺 → 新闻宏观刷新 → 到期回执核对 → 条件校准 → 技术/多因素分析 → 图表与组合报告”；每项任务写入 SQLite 审计表，达到样本、TTL 或冷却条件后自动跳过。根目录摘要同时显示四周期动作、评分和置信度，便于先看结论再下钻。
+- `stock auto`：无交互执行“依赖检查 → 条件同步/补缺 → 历史公司行动修复 → 新闻宏观刷新 → 到期回执核对 → 条件校准 → 技术/多因素分析 → 图表与组合报告”；每项任务写入 SQLite 审计表，达到样本、TTL 或冷却条件后自动跳过。根目录摘要同时显示四周期动作、评分和置信度，便于先看结论再下钻。
 - `stock evaluate --backtest CN:601318 --horizon-days 20`：执行至少三年历史的 walk-forward 基线回测。
 - `stock evaluate --backtest CN:601318 --with-chronos`：显式把 Chronos 加入历史回测，耗时明显增加。
 - 校准样本不足时可加 `--step 1 --max-windows 100 --with-chronos`；默认步长等于预测期限，样本会较少但窗口不重叠。

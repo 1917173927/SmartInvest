@@ -1519,24 +1519,17 @@ def sync_symbol(
     # Company actions are an independent data product.  A successful price
     # request must not prevent a fallback action provider from being tried when
     # the selected provider's dividend endpoint is unavailable.
-    action_providers = [selected]
-    action_providers.extend(
+    action_providers = [selected, *(
         provider
         for provider in (providers or provider_order(instrument))
         if provider is not selected and provider.supports(instrument)
+    )]
+    action_count, action_errors = sync_actions(
+        database, instrument.canonical, start=start, end=end, providers=action_providers
     )
-    action_error: str | None = None
-    for action_provider in action_providers:
-        try:
-            actions = action_provider.fetch_actions(instrument, start, end)
-            if actions:
-                database.upsert_actions(actions)
-                result.actions += len(actions)
-                break
-        except Exception as exc:
-            action_error = f"{action_provider.name}: {type(exc).__name__}: {exc}"
-    if action_error and result.actions == 0:
-        result.warnings.append(f"公司行动未同步: {action_error}")
+    result.actions = action_count
+    if action_errors and result.actions == 0:
+        result.warnings.append(f"公司行动未同步: {action_errors[-1]}")
 
     fundamental_records: list[FundamentalRecord] = []
     try:
@@ -1571,6 +1564,35 @@ def sync_symbol(
         }
     )
     return result
+
+
+def sync_actions(
+    database: Database,
+    raw_symbol: str,
+    *,
+    start: date,
+    end: date,
+    providers: Sequence[MarketDataProvider] | None = None,
+) -> tuple[int, list[str]]:
+    """Refresh corporate actions without re-downloading OHLCV bars.
+
+    This is used by the unattended repair path when old raw prices contain a
+    large ex-rights jump. The raw bars remain unchanged and providers are tried
+    in the supplied priority order.
+    """
+    instrument = Instrument.parse(raw_symbol)
+    errors: list[str] = []
+    for provider in providers or provider_order(instrument):
+        if not provider.supports(instrument):
+            continue
+        try:
+            actions = provider.fetch_actions(instrument, start, end)
+            if actions:
+                database.upsert_actions(actions)
+                return len(actions), errors
+        except Exception as exc:
+            errors.append(f"{provider.name}: {type(exc).__name__}: {exc}")
+    return 0, errors
 
 
 def backfill_symbol(

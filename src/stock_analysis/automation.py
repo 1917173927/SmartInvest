@@ -23,6 +23,7 @@ from stock_analysis.data import (
     coverage_warnings,
     quality_summary,
     safe_filename_component,
+    sync_actions,
     sync_symbol,
     total_return_frame,
     utc_now,
@@ -415,6 +416,45 @@ def run_automation(
             status="executed",
             reason=f"核对 {summary.evaluated_receipts} 条到期回执",
         )
+
+        # Repair historical ex-rights gaps independently from market-data sync.
+        # This path is cheap compared with re-downloading bars and is safe to
+        # repeat because corporate_actions uses an idempotent upsert key.
+        for symbol in sync_ready:
+            bars = database.load_bars(symbol, analysis_date)
+            if bars.empty:
+                continue
+            actions = database.load_actions(symbol, analysis_date)
+            frame, return_warnings = total_return_frame(bars, actions)
+            if not any("超过 35%" in warning for warning in return_warnings):
+                _task(
+                    summary,
+                    name="action-repair",
+                    status="skipped",
+                    reason="没有未解释的超大单日变动",
+                    symbol=symbol,
+                )
+                continue
+            start = pd.Timestamp(bars.iloc[0]["trade_date"]).date()
+            action_count, action_errors = sync_actions(
+                database, symbol, start=start, end=analysis_date
+            )
+            if action_count:
+                _task(
+                    summary,
+                    name="action-repair",
+                    status="executed",
+                    reason=f"补入 {action_count} 条历史公司行动并重新计算收益",
+                    symbol=symbol,
+                )
+            else:
+                _task(
+                    summary,
+                    name="action-repair",
+                    status="failed",
+                    reason="; ".join(action_errors) or "备用公司行动源未返回数据",
+                    symbol=symbol,
+                )
 
         # Optional unattended bootstrap: only run a walk-forward calibration for
         # a symbol/horizon whose evaluated sample count is still below target.
