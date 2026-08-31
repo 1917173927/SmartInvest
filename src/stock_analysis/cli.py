@@ -289,11 +289,20 @@ def backfill_command(
 
 
 @app.command("auto")
-def auto_command() -> None:
+def auto_command(
+    use_llm: Annotated[
+        bool | None,
+        typer.Option("--llm/--no-llm", help="是否启用证据事件抽取；默认读取配置"),
+    ] = None,
+    use_chronos: Annotated[
+        bool | None,
+        typer.Option("--chronos/--no-chronos", help="是否启用 Chronos；默认读取配置"),
+    ] = None,
+) -> None:
     """无交互运行同步、分析、回执核对和组合检查。"""
     config = AppConfig.load()
     try:
-        summary = run_automation(config)
+        summary = run_automation(config, use_llm=use_llm, use_chronos=use_chronos)
     except Exception as exc:
         console.print(f"[red]自动运行失败：{exc}[/red]")
         raise typer.Exit(1) from exc
