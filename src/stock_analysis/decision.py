@@ -71,6 +71,25 @@ class HorizonDecision(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class StagingTier(BaseModel):
+    tier_name: str
+    target_price: float
+    weight_pct: float
+    shares: int
+    allocated_amount: float
+    rationale: str
+
+
+class StagingPlan(BaseModel):
+    available: bool = False
+    total_target_weight: float = 0.0
+    total_shares: int = 0
+    total_capital: float = 0.0
+    tiers: list[StagingTier] = Field(default_factory=list)
+    invalidation_price: float | None = None
+    invalidation_note: str = ""
+
+
 class AnalysisPackage(BaseModel):
     symbol: str
     name: str
@@ -92,6 +111,7 @@ class AnalysisPackage(BaseModel):
     chart_paths: list[str] = Field(default_factory=list)
     price_zones: list[PriceZone] = Field(default_factory=list)
     price_zone_validation: list[PriceZoneValidation] = Field(default_factory=list)
+    staging_plan: StagingPlan | None = None
 
 
 class PortfolioPosition(BaseModel):
@@ -735,6 +755,109 @@ def build_decisions(
     return decisions
 
 
+def compute_staging_plan(
+    *,
+    current_price: float,
+    valuation_range: ValuationRange,
+    price_zones: list[PriceZone],
+    role: str = "satellite",
+    total_capital: float = 100000.0,
+    target_position: float | None = None,
+    risk_budget: float = 0.02,
+) -> StagingPlan:
+    """Compute an actionable 3-tier staging execution grid with precise share counts."""
+    if current_price <= 0:
+        return StagingPlan()
+
+    target_weight = (
+        target_position if target_position is not None else (0.20 if role == "core" else 0.10)
+    )
+    allocated_total_budget = total_capital * target_weight
+
+    supports = [z for z in price_zones if z.kind == "support" and z.center < current_price]
+    supports.sort(key=lambda z: z.center, reverse=True)
+    nearest_sup = supports[0] if supports else None
+    deeper_sup = supports[1] if len(supports) > 1 else None
+
+    vr = valuation_range
+    if vr.available and vr.buy_high and current_price > vr.buy_high:
+        t1_price = round(vr.buy_high, 2)
+        t1_note = "现价高于买入线，挂单于安全边际买入上限建立底仓"
+    else:
+        t1_price = round(current_price, 2)
+        t1_note = "现价处于合理/折价击球区，启动首笔跟踪底仓"
+
+    if nearest_sup:
+        t2_price = round(nearest_sup.high, 2)
+        t2_note = f"在近端强支撑区间上沿 ({nearest_sup.low:.2f}–{nearest_sup.high:.2f}) 挂单加仓"
+    elif vr.available and vr.fair_low and vr.fair_low < t1_price:
+        t2_price = round(vr.fair_low, 2)
+        t2_note = "在合理价值区间下沿挂单加仓"
+    else:
+        t2_price = round(t1_price * 0.95, 2)
+        t2_note = "在首笔买点下方 -5% 处挂单加仓"
+
+    if deeper_sup:
+        t3_price = round(deeper_sup.center, 2)
+        t3_note = f"在次级纵深支撑带 ({deeper_sup.low:.2f}–{deeper_sup.high:.2f}) 挂单"
+    elif vr.available and vr.buy_low:
+        t3_price = round(min(vr.buy_low, t2_price * 0.96), 2)
+        t3_note = "在深度安全边际买入下沿挂单"
+    else:
+        t3_price = round(t2_price * 0.95, 2)
+        t3_note = "在加仓买点下方 -5% 深度折价处挂单"
+
+    if t2_price >= t1_price:
+        t2_price = round(t1_price * 0.96, 2)
+    if t3_price >= t2_price:
+        t3_price = round(t2_price * 0.96, 2)
+
+    tier_weights = [0.30, 0.40, 0.30]
+    tier_prices = [t1_price, t2_price, t3_price]
+    tier_notes = [t1_note, t2_note, t3_note]
+    tier_names = [
+        "① 首笔底仓 (Initial)",
+        "② 回调加仓 (Dip Support)",
+        "③ 极限买点 (Value Floor)",
+    ]
+
+    tiers: list[StagingTier] = []
+    total_shares = 0
+    actual_total_capital = 0.0
+
+    for name, w_pct, p, note in zip(tier_names, tier_weights, tier_prices, tier_notes, strict=True):
+        tier_budget = allocated_total_budget * w_pct
+        raw_shares = int(tier_budget // (p * 100)) * 100
+        shares = max(100, raw_shares) if allocated_total_budget >= p * 100 else 0
+        allocated = shares * p
+        total_shares += shares
+        actual_total_capital += allocated
+        tiers.append(
+            StagingTier(
+                tier_name=name,
+                target_price=p,
+                weight_pct=w_pct,
+                shares=shares,
+                allocated_amount=allocated,
+                rationale=note,
+            )
+        )
+
+    lowest_sup_floor = min((z.low for z in supports), default=t3_price * 0.93)
+    inval_price = round(min(lowest_sup_floor, t3_price * 0.94), 2)
+    inval_note = f"连续两日有效收盘击穿 {inval_price:.2f} 或基本面恶化时止损/失效"
+
+    return StagingPlan(
+        available=True,
+        total_target_weight=target_weight,
+        total_shares=total_shares,
+        total_capital=actual_total_capital,
+        tiers=tiers,
+        invalidation_price=inval_price,
+        invalidation_note=inval_note,
+    )
+
+
 def analyze_package(
     *,
     config: AppConfig,
@@ -830,6 +953,13 @@ def analyze_package(
             decision.invalidation_conditions.append(
                 f"突破 {nearest_resistance.high:.2f} 后若无法站稳，仍按压力带处理"
             )
+    staging_plan = compute_staging_plan(
+        current_price=price,
+        valuation_range=value_range,
+        price_zones=price_zones,
+        role=str(profile.get("role", "satellite")),
+        target_position=decisions[0].target_position if decisions else None,
+    )
     return AnalysisPackage(
         symbol=symbol,
         name=str(profile.get("name", symbol)),
@@ -849,6 +979,7 @@ def analyze_package(
         macro_score=macro_score,
         price_zones=price_zones,
         price_zone_validation=price_zone_validation,
+        staging_plan=staging_plan,
     )
 
 

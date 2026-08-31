@@ -26,13 +26,19 @@ def render_executive_summary_card(package: AnalysisPackage) -> list[str]:
     # 1. Contradiction & Balance (Core driver vs headwind)
     vr = package.valuation_range
     valuation_part = "估值中性"
+    valuation_badge = "⚪"
     if vr.available and vr.buy_high:
         if package.current_price <= vr.buy_high:
-            valuation_part = "处于安全边际买入区间"
+            dist_pct = package.current_price / vr.buy_high - 1
+            valuation_part = f"处于安全边际买入区间 (距买入上限 {dist_pct:+.1%})"
+            valuation_badge = "🟢"
         elif vr.fair_low and package.current_price <= vr.fair_low:
             valuation_part = "处于合理偏低价值区间"
+            valuation_badge = "🟡"
         else:
-            valuation_part = "高于保守买入线，需耐心等待安全边际"
+            dist_pct = package.current_price / vr.buy_high - 1
+            valuation_part = f"高于保守买入线 (+{dist_pct:.1%}，需等待安全边际)"
+            valuation_badge = "⚪"
 
     tech_notes: list[str] = []
     for m in package.technical:
@@ -60,7 +66,7 @@ def render_executive_summary_card(package: AnalysisPackage) -> list[str]:
     )
 
     point1 = (
-        f"**核心特征与多空评估**：{valuation_part}；{tech_summary}"
+        f"**核心特征与多空评估**：{valuation_badge} {valuation_part}；{tech_summary}"
         f"（宏观因子分 {package.macro_score:+.2f}）。"
     )
 
@@ -127,6 +133,18 @@ def render_analysis_markdown(package: AnalysisPackage) -> str:
     elif any("减仓" in a or "回避" in a for a in actions_set):
         tags.append("决策/回避减仓")
 
+    short_d = next((d for d in package.decisions if d.horizon == "short"), None)
+    medium_d = next((d for d in package.decisions if d.horizon == "medium"), None)
+    long_d = next((d for d in package.decisions if d.horizon == "long"), None)
+    value_d = next((d for d in package.decisions if d.horizon == "value"), None)
+
+    val_status = "neutral"
+    vr = package.valuation_range
+    if vr.available and vr.buy_high and package.current_price <= vr.buy_high:
+        val_status = "discount"
+    elif vr.available and vr.fair_high and package.current_price > vr.fair_high:
+        val_status = "premium"
+
     lines = [
         "---",
         "type: automated-stock-analysis",
@@ -136,8 +154,17 @@ def render_analysis_markdown(package: AnalysisPackage) -> str:
         f"data_quality: {package.data_quality.value}",
         f"current_price: {package.current_price:.3f}",
         f"currency: {package.currency}",
-        "tags:",
+        f"valuation_status: {val_status}",
     ]
+    if short_d:
+        lines.append(f"short_action: {short_d.action}")
+    if medium_d:
+        lines.append(f"medium_action: {medium_d.action}")
+    if long_d:
+        lines.append(f"long_action: {long_d.action}")
+    if value_d:
+        lines.append(f"value_action: {value_d.action}")
+    lines.append("tags:")
     for tag in tags:
         lines.append(f"  - {tag}")
     vr = package.valuation_range
@@ -343,6 +370,40 @@ def render_analysis_markdown(package: AnalysisPackage) -> str:
         for item in package.research.evidence:
             source_text = f"[{item.title}]({item.source_url})" if item.source_url else item.title
             lines.append(f"- [{item.id}] {source_text}，发布于 {item.published_at.isoformat()}")
+    if package.staging_plan and package.staging_plan.available:
+        plan = package.staging_plan
+        lines.extend(
+            [
+                "",
+                "## 🎯 实盘阶梯挂单执行网格（Staging Execution Grid）",
+                "",
+                f"> **基准资金规模**：100,000 {package.currency} 测算"
+                f"（目标组合占比 **{plan.total_target_weight:.0%}**，"
+                f"预计总动用资金 **{plan.total_capital:,.2f} {package.currency}**；"
+                "可使用终端 `stock size` 动态调整）。",
+                "",
+                "| 批次 | 目标价 | 挂单配比 | 建议股数(手数) | 预计占用资金 | 执行逻辑与条件 |",
+                "|---|---:|---:|---:|---:|---|",
+            ]
+        )
+        for tier in plan.tiers:
+            lots = tier.shares // 100
+            lots_text = f"{tier.shares} 股 ({lots}手)" if lots > 0 else f"{tier.shares} 股"
+            lines.append(
+                f"| {tier.tier_name} | {tier.target_price:.2f} {package.currency} | "
+                f"{tier.weight_pct:.0%} | {lots_text} | "
+                f"{tier.allocated_amount:,.2f} {package.currency} | {tier.rationale} |"
+            )
+        if plan.invalidation_price:
+            lines.extend(
+                [
+                    "",
+                    f"> [!danger] 硬止损与逻辑失效线："
+                    f"**< {plan.invalidation_price:.2f} {package.currency}**"
+                    f"（{plan.invalidation_note}）。",
+                ]
+            )
+
     lines.extend(["", "## 行动计划与反证", ""])
     for item in package.decisions:
         lines.extend(

@@ -41,6 +41,7 @@ from stock_analysis.decision import (
     Horizon,
     HorizonDecision,
     analyze_package,
+    compute_staging_plan,
     create_receipts,
     get_valuation_strategy,
     latest_portfolio_snapshot,
@@ -1027,6 +1028,248 @@ def dash_command() -> None:
             _cell(long_d),
             _cell(val_d),
             warnings_txt,
+        )
+
+    console.print(table)
+    database.close()
+
+
+@app.command("size")
+def size_command(
+    symbol: Annotated[str, typer.Argument(help="标准证券代码，如 CN:601318")],
+    capital: Annotated[float, typer.Option(help="账户总可用资产/资本规模（元）")] = 100000.0,
+    target_weight: Annotated[
+        float | None, typer.Option(help="自定义目标仓位上限（如 0.15 表示 15%）")
+    ] = None,
+    risk_budget: Annotated[
+        float, typer.Option(help="单笔交易最大承受风险比例（如 0.02 表示 2%）")
+    ] = 0.02,
+) -> None:
+    """实盘仓位测算与阶梯挂单生成器：根据账户资产与风险预算，精确计算三档买点股数与止损线。"""
+    config, database = _context()
+    canonical = Instrument.parse(symbol).canonical
+    profile = config.asset(canonical)
+    name = str(profile.get("name", canonical))
+    role = str(profile.get("role", "satellite"))
+
+    bars = database.load_bars(canonical, date.today())
+    if bars.empty:
+        database.close()
+        console.print("[red]没有可用行情缓存，请先运行 stock sync。[/red]")
+        raise typer.Exit(1)
+
+    current_price = float(bars.iloc[-1]["close"])
+    currency = str(bars.iloc[-1].get("currency", "CNY"))
+    quality, _ = quality_summary(bars, date.today())
+    frame, _ = _load_analysis_frame(database, canonical, date.today())
+
+    research = run_research(
+        database=database,
+        config=config,
+        symbol=canonical,
+        as_of=date.today(),
+        use_llm=False,
+    )
+    package = analyze_package(
+        config=config,
+        database=database,
+        symbol=canonical,
+        as_of=date.today(),
+        frame=frame,
+        data_quality=quality,
+        data_warnings=[],
+        forecasts=[],
+        research=research,
+    )
+
+    assigned_weight = (
+        target_weight
+        if target_weight is not None
+        else (package.decisions[0].target_position if package.decisions else None)
+    )
+
+    plan = compute_staging_plan(
+        current_price=current_price,
+        valuation_range=package.valuation_range,
+        price_zones=package.price_zones,
+        role=role,
+        total_capital=capital,
+        target_position=assigned_weight,
+        risk_budget=risk_budget,
+    )
+
+    console.print(f"\n[bold cyan]🎯 实盘阶梯建仓测算：{name} ({canonical})[/bold cyan]")
+    allocated_cap = capital * plan.total_target_weight
+    console.print(
+        f"现价: [bold]{current_price:.2f} {currency}[/bold] | "
+        f"账户总资产: [bold]{capital:,.2f} {currency}[/bold] | "
+        f"目标上限: [bold]{plan.total_target_weight:.0%}[/bold] ({allocated_cap:,.2f} {currency})"
+    )
+
+    table = Table(title="阶梯挂单执行计划 (Staging Execution Plan)")
+    table.add_column("批次", style="bold")
+    table.add_column("挂单/触发价", justify="right")
+    table.add_column("配比", justify="center")
+    table.add_column("建议股数", justify="right")
+    table.add_column("建议手数", justify="right")
+    table.add_column("占用资金", justify="right")
+    table.add_column("执行逻辑与依据")
+
+    for tier in plan.tiers:
+        lots = tier.shares // 100
+        table.add_row(
+            tier.tier_name,
+            f"{tier.target_price:.2f} {currency}",
+            f"{tier.weight_pct:.0%}",
+            f"{tier.shares} 股",
+            f"{lots} 手" if lots > 0 else "不足1手",
+            f"{tier.allocated_amount:,.2f} {currency}",
+            tier.rationale,
+        )
+
+    console.print(table)
+
+    if plan.invalidation_price:
+        max_loss = max(
+            0.0,
+            sum(
+                tier.shares * max(0.0, tier.target_price - plan.invalidation_price)
+                for tier in plan.tiers
+            ),
+        )
+        loss_pct_of_capital = max_loss / capital if capital else 0.0
+        console.print(
+            f"[bold red]🛑 逻辑失效与止损参考线[/bold red]：< "
+            f"[bold]{plan.invalidation_price:.2f} {currency}[/bold]"
+        )
+        console.print(
+            f"预估全单极端最大亏损金额: [bold]{max_loss:,.2f} {currency}[/bold] "
+            f"([bold]{loss_pct_of_capital:.2%}[/bold] 账户总资产)"
+        )
+        console.print(f"失效说明: {plan.invalidation_note}\n")
+
+    database.close()
+
+
+@app.command("compare")
+def compare_command(
+    symbols: Annotated[
+        list[str],
+        typer.Argument(help="待比较的证券代码列表，如 CN:601318 CN:600519 HK:00700"),
+    ],
+) -> None:
+    """跨标的多维横向比对矩阵：对比各标的的估值折扣、多周期信号与建仓优先级。"""
+    config, database = _context()
+    if not symbols:
+        console.print("[yellow]请提供至少一个证券代码。[/yellow]")
+        database.close()
+        return
+
+    packages: list[AnalysisPackage] = []
+    for raw in symbols:
+        try:
+            canonical = Instrument.parse(raw).canonical
+        except Exception:
+            canonical = raw
+        bars = database.load_bars(canonical, date.today())
+        if bars.empty:
+            console.print(f"[yellow]标的 {canonical} 没有可用行情缓存，已跳过。[/yellow]")
+            continue
+        quality, _ = quality_summary(bars, date.today())
+        frame, _ = _load_analysis_frame(database, canonical, date.today())
+        research = run_research(
+            database=database,
+            config=config,
+            symbol=canonical,
+            as_of=date.today(),
+            use_llm=False,
+        )
+        pkg = analyze_package(
+            config=config,
+            database=database,
+            symbol=canonical,
+            as_of=date.today(),
+            frame=frame,
+            data_quality=quality,
+            data_warnings=[],
+            forecasts=[],
+            research=research,
+        )
+        packages.append(pkg)
+
+    if not packages:
+        console.print("[red]未能成功分析任何标的。[/red]")
+        database.close()
+        return
+
+    def _priority(p: AnalysisPackage) -> float:
+        val_score = 0.0
+        if p.valuation_range.available and p.valuation_range.buy_high:
+            if p.current_price <= p.valuation_range.buy_high:
+                val_score = 1.0 + (p.valuation_range.buy_high / p.current_price - 1)
+            elif p.valuation_range.fair_low and p.current_price <= p.valuation_range.fair_low:
+                val_score = 0.5
+            else:
+                val_score = -0.5
+        dec_score = sum(d.score for d in p.decisions) / max(1, len(p.decisions))
+        return float(val_score * 0.6 + dec_score * 0.4)
+
+    ranked = sorted(packages, key=_priority, reverse=True)
+
+    table = Table(title="SmartInvest 跨标的多维优选与比对矩阵 (Comparison Matrix)")
+    table.add_column("排名 / 标的", style="bold")
+    table.add_column("现价", justify="right")
+    table.add_column("数据", justify="center")
+    table.add_column("估值状态", justify="center")
+    table.add_column("买入线距离", justify="right")
+    table.add_column("短线", justify="center")
+    table.add_column("中线", justify="center")
+    table.add_column("长线/价值", justify="center")
+    table.add_column("优选建议", style="bold cyan")
+
+    for rank, pkg in enumerate(ranked, 1):
+        vr = pkg.valuation_range
+        dist_str = "—"
+        val_str = "中性"
+        if vr.available and vr.buy_high:
+            dist = pkg.current_price / vr.buy_high - 1
+            dist_str = f"{dist:+.1%}"
+            if pkg.current_price <= vr.buy_high:
+                val_str = "[green]进入买入区[/green]"
+            elif vr.fair_low and pkg.current_price <= vr.fair_low:
+                val_str = "[yellow]合理偏低[/yellow]"
+            else:
+                val_str = "[white]高于买入线[/white]"
+
+        decisions_map = {d.horizon.value: d for d in pkg.decisions}
+        s_d = decisions_map.get("short")
+        m_d = decisions_map.get("medium")
+        l_d = decisions_map.get("long") or decisions_map.get("value")
+
+        def _badge(d: HorizonDecision | None) -> str:
+            if not d:
+                return "—"
+            c = "green" if "买入" in d.action else "yellow" if "持有" in d.action else "red"
+            return f"[{c}]{d.action}[/{c}]"
+
+        priority_score = _priority(pkg)
+        if priority_score >= 0.5:
+            rec = "🔥 优先建仓"
+        elif priority_score >= 0.0:
+            rec = "👀 跟踪观察"
+        else:
+            rec = "✋ 暂缓观望"
+
+        table.add_row(
+            f"#{rank} {pkg.name}\n[dim]{pkg.symbol}[/dim]",
+            f"{pkg.current_price:.2f} {pkg.currency}",
+            pkg.data_quality.value,
+            val_str,
+            dist_str,
+            _badge(s_d),
+            _badge(m_d),
+            _badge(l_d),
+            rec,
         )
 
     console.print(table)

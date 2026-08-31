@@ -159,3 +159,119 @@ fair_pb = 1.10
     assert result.exit_code == 0
     assert "实时决策看板" in result.output
     assert "中国平" in result.output
+
+
+def test_cli_size_command(tmp_path, monkeypatch) -> None:
+    toml_path = tmp_path / "stock-analysis.toml"
+    toml_path.write_text(
+        """[assets."CN:601318"]
+name = "中国平安"
+sector = "金融"
+role = "core"
+valuation_model = "insurer"
+fair_pe = 9.0
+fair_pb = 1.10
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("STOCK_ANALYSIS_HOME", str(tmp_path))
+    db_path = tmp_path / ".stock-analysis" / "analysis.sqlite3"
+
+    with Database(db_path) as db:
+        db.upsert_bars(
+            [
+                Bar(
+                    symbol="CN:601318",
+                    trade_date=date(2026, 8, 31),
+                    open=55.0,
+                    high=56.0,
+                    low=54.5,
+                    close=55.0,
+                    volume=10000,
+                    currency="CNY",
+                    source="fixture",
+                    quality=DataQuality.B,
+                )
+            ]
+        )
+        db.upsert_fundamentals(
+            [
+                FundamentalRecord(
+                    symbol="CN:601318",
+                    metric="pe",
+                    value=6.5,
+                    unit="x",
+                    as_of=date(2026, 8, 31),
+                    source="fixture",
+                    quality="B",
+                ),
+                FundamentalRecord(
+                    symbol="CN:601318",
+                    metric="pb",
+                    value=0.95,
+                    unit="x",
+                    as_of=date(2026, 8, 31),
+                    source="fixture",
+                    quality="B",
+                ),
+            ]
+        )
+
+    result = runner.invoke(
+        app,
+        ["size", "CN:601318", "--capital", "200000", "--target-weight", "0.20"],
+        env={"COLUMNS": "160"},
+    )
+    assert result.exit_code == 0
+    assert "实盘阶梯建仓测算" in result.output
+    assert "首笔底仓" in result.output
+    assert "建议手数" in result.output
+    assert "逻辑失效与止损参考线" in result.output
+
+
+def test_cli_compare_command(tmp_path, monkeypatch) -> None:
+    toml_path = tmp_path / "stock-analysis.toml"
+    toml_path.write_text(
+        """[assets."CN:601318"]
+name = "中国平安"
+sector = "金融"
+role = "core"
+
+[assets."CN:600519"]
+name = "贵州茅台"
+sector = "消费"
+role = "core"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("STOCK_ANALYSIS_HOME", str(tmp_path))
+    db_path = tmp_path / ".stock-analysis" / "analysis.sqlite3"
+
+    with Database(db_path) as db:
+        for sym, price in [("CN:601318", 55.0), ("CN:600519", 1500.0)]:
+            db.upsert_bars(
+                [
+                    Bar(
+                        symbol=sym,
+                        trade_date=date(2026, 8, 31),
+                        open=price,
+                        high=price * 1.01,
+                        low=price * 0.99,
+                        close=price,
+                        volume=10000,
+                        currency="CNY",
+                        source="fixture",
+                        quality=DataQuality.B,
+                    )
+                ]
+            )
+
+    result = runner.invoke(
+        app,
+        ["compare", "CN:601318", "CN:600519"],
+        env={"COLUMNS": "160"},
+    )
+    assert result.exit_code == 0
+    assert "跨标的多维优选与比对矩阵" in result.output
+    assert "中国平安" in result.output
+    assert "贵州茅台" in result.output
