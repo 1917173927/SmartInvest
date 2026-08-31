@@ -30,7 +30,7 @@ def test_embedding_service_can_be_separate_from_chat(monkeypatch, tmp_path) -> N
 
 def test_gemini_embedding_configuration_is_supported(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
-    monkeypatch.setenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
+    monkeypatch.setenv("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-001")
     client = OpenAICompatibleClient(AppConfig(tmp_path, {}))
     assert client.embedding_available
     assert client.embedding_model == "gemini-embedding-001"

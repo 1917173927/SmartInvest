@@ -140,7 +140,9 @@ class OpenAICompatibleClient:
         self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
         self.model = os.getenv("STOCK_ANALYSIS_MODEL", "")
         self.gemini_api_key = os.getenv("GEMINI_API_KEY", "")
-        self.gemini_embedding_model = os.getenv("GEMINI_EMBEDDING_MODEL", "")
+        self.gemini_embedding_model = os.getenv("GEMINI_EMBEDDING_MODEL", "").removeprefix(
+            "models/"
+        )
         self.embedding_model = (
             os.getenv("STOCK_ANALYSIS_EMBEDDING_MODEL") or self.gemini_embedding_model
         )
