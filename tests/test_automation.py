@@ -7,6 +7,7 @@ import pandas as pd
 
 from stock_analysis.automation import (
     AutomationSummary,
+    calibration_symbol_order,
     configured_evidence_paths,
     organize_reports,
     render_summary_markdown,
@@ -99,3 +100,13 @@ def test_summary_surfaces_action_score_and_confidence(tmp_path) -> None:
     }
     rendered = render_summary_markdown(config, summary)
     assert "持有/观察<br>评分 +0.25 / 置信 75%" in rendered
+
+
+def test_calibration_symbol_order_rotates_without_losing_symbols() -> None:
+    symbols = ["CN:601398", "CN:601318", "CN:000933"]
+    first = calibration_symbol_order(symbols, date(2026, 8, 31))
+    second = calibration_symbol_order(symbols, date(2026, 9, 1))
+    assert sorted(first) == sorted(symbols)
+    assert sorted(second) == sorted(symbols)
+    assert first != second
+    assert calibration_symbol_order([], date(2026, 8, 31)) == []

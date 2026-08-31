@@ -121,6 +121,14 @@ def _calibration_in_cooldown(
     return datetime.now(tz=UTC) - evaluated < timedelta(days=cooldown_days)
 
 
+def calibration_symbol_order(symbols: list[str], analysis_date: date) -> list[str]:
+    """Return a deterministic daily rotation for fair calibration scheduling."""
+    if not symbols:
+        return []
+    offset = analysis_date.toordinal() % len(symbols)
+    return symbols[offset:] + symbols[:offset]
+
+
 def configured_symbols(config: AppConfig) -> list[str]:
     """Return configured instruments in stable TOML order, excluding malformed keys."""
     symbols: list[str] = []
@@ -552,11 +560,7 @@ def run_automation(
             # Rotate the starting symbol by analysis day. With a one-job daily
             # budget this prevents the first configured asset from monopolizing
             # all calibration slots for several days.
-            if sync_ready:
-                offset = analysis_date.toordinal() % len(sync_ready)
-                calibration_symbols = sync_ready[offset:] + sync_ready[:offset]
-            else:
-                calibration_symbols = []
+            calibration_symbols = calibration_symbol_order(sync_ready, analysis_date)
             for symbol in calibration_symbols:
                 bars = database.load_bars(symbol, analysis_date)
                 actions = database.load_actions(symbol, analysis_date)
