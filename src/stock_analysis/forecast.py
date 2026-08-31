@@ -616,6 +616,8 @@ def walk_forward_backtest(
         ensemble, actual_weights = _blend(baseline, chronos, weights)
         evaluation = {
             "actual_return": actual,
+            "forecast_q50": float(ensemble.q50),
+            "up_probability": float(ensemble.up_probability),
             "direction_correct": bool((actual >= 0) == (ensemble.q50 >= 0)),
             "interval_covered": bool(ensemble.q10 <= actual <= ensemble.q90),
             "ensemble_loss": estimate_loss(actual, ensemble.model_dump()),
@@ -656,13 +658,49 @@ def walk_forward_backtest(
         records.append(evaluation)
     if not records:
         raise ValueError("没有可用的 walk-forward 窗口")
+
+    # Quantitative Strategy Performance Metrics
+    trade_signals = [item for item in records if item["forecast_q50"] > 0]
+    trade_returns = [item["actual_return"] for item in trade_signals]
+    wins = [r for r in trade_returns if r > 0]
+    losses = [r for r in trade_returns if r < 0]
+    win_rate = len(wins) / len(trade_returns) if trade_returns else 0.0
+    tot_win = sum(wins)
+    tot_loss = abs(sum(losses))
+    profit_factor = tot_win / tot_loss if tot_loss > 1e-9 else (99.0 if tot_win > 0 else 1.0)
+    avg_win = float(np.mean(wins)) if wins else 0.0
+    avg_loss = float(np.mean(losses)) if losses else 0.0
+    expected_value = win_rate * avg_win + (1.0 - win_rate) * avg_loss
+
+    # Strategy Cumulative Equity & Drawdown
+    strat_returns = np.array(trade_returns if trade_returns else [0.0])
+    equity_curve = np.cumprod(1.0 + strat_returns)
+    running_max = np.maximum.accumulate(equity_curve)
+    drawdowns = (equity_curve - running_max) / running_max
+    max_drawdown = float(abs(np.min(drawdowns))) if len(drawdowns) > 0 else 0.0
+
+    ret_std = float(np.std(strat_returns)) if len(strat_returns) > 1 else 0.0
+    ret_mean = float(np.mean(strat_returns))
+    periods_per_year = max(1.0, 252.0 / horizon_days)
+    sharpe_ratio = (
+        float((ret_mean / ret_std) * math.sqrt(periods_per_year)) if ret_std > 1e-9 else 0.0
+    )
+
     return {
         "symbol": symbol,
         "horizon_days": horizon_days,
         "windows": len(records),
+        "active_trades": len(trade_signals),
         "chronos_used": use_chronos,
         "direction_accuracy": float(np.mean([item["direction_correct"] for item in records])),
         "interval_coverage": float(np.mean([item["interval_covered"] for item in records])),
+        "win_rate": float(win_rate),
+        "profit_factor": float(profit_factor),
+        "avg_win": float(avg_win),
+        "avg_loss": float(avg_loss),
+        "expected_return": float(expected_value),
+        "sharpe_ratio": float(sharpe_ratio),
+        "max_drawdown": float(max_drawdown),
         "ensemble_pinball_loss": float(np.mean([item["ensemble_loss"] for item in records])),
         "baseline_pinball_loss": float(np.mean([item["baseline_loss"] for item in records])),
         "chronos_pinball_loss": (

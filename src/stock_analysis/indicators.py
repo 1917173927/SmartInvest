@@ -232,6 +232,76 @@ def macro_exposures(profile: dict[str, object]) -> dict[str, float]:
     return {"CSI300": 0.35, "DXY": 0.15, "US10Y": 0.15, "SHIBOR": 0.10, "WTI": 0.15, "GOLD": 0.10}
 
 
+def yang_zhang_volatility(
+    frame: pd.DataFrame, window: int = 20, min_periods: int = 10
+) -> pd.Series:
+    """Yang-Zhang (2000) minimum-variance drift-independent volatility estimator.
+
+    Handles overnight jumps and non-zero drift using Open, High, Low, Close prices.
+    Returns annualized volatility series.
+    """
+    if frame.empty or len(frame) < 2:
+        return pd.Series(dtype=float)
+    open_p = frame["open"].astype(float)
+    high_p = frame["high"].astype(float)
+    low_p = frame["low"].astype(float)
+    close_p = frame["close"].astype(float)
+    prev_close = close_p.shift(1).bfill()
+
+    log_ho = np.log(np.maximum(high_p / np.maximum(open_p, 1e-9), 1e-9))
+    log_lo = np.log(np.maximum(low_p / np.maximum(open_p, 1e-9), 1e-9))
+    log_co = np.log(np.maximum(close_p / np.maximum(open_p, 1e-9), 1e-9))
+    log_oc = np.log(np.maximum(open_p / np.maximum(prev_close, 1e-9), 1e-9))
+
+    rs_daily = log_ho * (log_ho - log_co) + log_lo * (log_lo - log_co)
+    var_rs = rs_daily.rolling(window, min_periods=min_periods).mean()
+    var_open = log_oc.rolling(window, min_periods=min_periods).var(ddof=1)
+    var_close = log_co.rolling(window, min_periods=min_periods).var(ddof=1)
+
+    k = 0.34 / (1.34 + (window + 1) / max(1, window - 1))
+    var_yz = var_open.fillna(0.0) + k * var_close.fillna(0.0) + (1.0 - k) * var_rs.fillna(0.0)
+    annualized_vol = np.sqrt(np.maximum(var_yz, 0.0) * 252)
+    return annualized_vol.fillna(0.0)
+
+
+def garman_klass_volatility(
+    frame: pd.DataFrame, window: int = 20, min_periods: int = 10
+) -> pd.Series:
+    """Garman-Klass (1980) OHLC range-based volatility estimator."""
+    if frame.empty or len(frame) < 2:
+        return pd.Series(dtype=float)
+    open_p = frame["open"].astype(float)
+    high_p = frame["high"].astype(float)
+    low_p = frame["low"].astype(float)
+    close_p = frame["close"].astype(float)
+
+    log_hl = np.log(np.maximum(high_p / np.maximum(low_p, 1e-9), 1e-9))
+    log_co = np.log(np.maximum(close_p / np.maximum(open_p, 1e-9), 1e-9))
+
+    gk_daily = 0.5 * (log_hl**2) - (2.0 * math.log(2.0) - 1.0) * (log_co**2)
+    var_gk = gk_daily.rolling(window, min_periods=min_periods).mean()
+    annualized_vol = np.sqrt(np.maximum(var_gk, 0.0) * 252)
+    return annualized_vol.fillna(0.0)
+
+
+def trend_smoothness_ratio(
+    frame: pd.DataFrame, window: int = 60, min_periods: int = 20
+) -> pd.Series:
+    """Trend Smoothness & Information Ratio of Trend (Blitz et al., 2013).
+
+    Measures risk-adjusted trajectory: cumulative logarithmic return / realized YZ volatility.
+    High positive value indicates strong, low-noise upward trend.
+    """
+    if frame.empty or len(frame) < min_periods:
+        return pd.Series(dtype=float)
+    close_p = frame["close"].astype(float)
+    yz_vol = yang_zhang_volatility(frame, window=window, min_periods=min_periods)
+    cum_ret = np.log(close_p / close_p.shift(window).bfill()).fillna(0.0)
+    horizon_vol = np.maximum(yz_vol * math.sqrt(window / 252), 0.01)
+    smoothness = cum_ret / horizon_vol
+    return smoothness.fillna(0.0)
+
+
 def add_indicators(frame: pd.DataFrame) -> pd.DataFrame:
     """Add trailing technical indicators without using future rows."""
     if frame.empty:
@@ -260,6 +330,9 @@ def add_indicators(frame: pd.DataFrame) -> pd.DataFrame:
     result["atr14"] = true_range.rolling(14, min_periods=1).mean()
     volume_mean = volume.rolling(20, min_periods=1).mean().replace(0, np.nan)
     result["volume_ratio20"] = (volume / volume_mean).replace([np.inf, -np.inf], np.nan).fillna(1.0)
+    result["yz_vol20"] = yang_zhang_volatility(result, window=20)
+    result["gk_vol20"] = garman_klass_volatility(result, window=20)
+    result["trend_smoothness60"] = trend_smoothness_ratio(result, window=60)
     return result
 
 
@@ -277,6 +350,9 @@ def technical_values(frame: pd.DataFrame) -> dict[str, float | None]:
         "rsi14",
         "atr14",
         "volume_ratio20",
+        "yz_vol20",
+        "gk_vol20",
+        "trend_smoothness60",
     )
     return {key: float(row[key]) if pd.notna(row[key]) else None for key in keys}
 

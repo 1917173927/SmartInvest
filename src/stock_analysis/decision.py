@@ -242,6 +242,31 @@ def technical_assessments(frame: pd.DataFrame) -> list[MetricAssessment]:
             f"成交量约为 20 日均量的 {volume_ratio:.2f} 倍",
         )
     )
+    if "yz_vol20" in latest and pd.notna(latest["yz_vol20"]):
+        yz_vol = float(latest["yz_vol20"])
+        yz_score = float(np.clip(math.tanh((0.25 - yz_vol) * 5), -1, 1))
+        regime = (
+            "低波动扩张期" if yz_vol < 0.18 else "常态波动期" if yz_vol < 0.30 else "高波动风险期"
+        )
+        results.append(
+            _metric(
+                "Yang-Zhang波动率",
+                yz_vol,
+                yz_score,
+                f"Yang-Zhang(2000)极小方差无偏年化波动率 {yz_vol:.1%} ({regime})",
+            )
+        )
+    if "trend_smoothness60" in latest and pd.notna(latest["trend_smoothness60"]):
+        smoothness = float(latest["trend_smoothness60"])
+        smooth_score = float(np.clip(math.tanh(smoothness * 0.7), -1, 1))
+        results.append(
+            _metric(
+                "特质趋势平滑度",
+                smoothness,
+                smooth_score,
+                f"Blitz(2013)残差趋势信噪比 {smoothness:+.2f}；反映低噪音持续性",
+            )
+        )
     return results
 
 
@@ -253,67 +278,101 @@ def _value(records: dict[str, FundamentalRecord], key: str) -> float | None:
 
 
 def quality_assessments(records: dict[str, FundamentalRecord]) -> list[MetricAssessment]:
+    """Calculate multi-dimensional Quality-Minus-Junk (QMJ, Asness et al. 2019) scores."""
     results: list[MetricAssessment] = []
+    score_prof = 0.0
     roe = _value(records, "roe")
     if roe is not None:
-        score = (roe - 0.08) / 0.12
-        results.append(_metric("ROE", roe, score, f"ROE {roe:.1%}"))
+        score_prof = (roe - 0.08) / 0.12
+        results.append(_metric("ROE", roe, score_prof, f"ROE {roe:.1%} (盈利能力)"))
     else:
         results.append(_metric("ROE", None, 0, "缺少可核验 ROE"))
 
+    score_cash = 0.0
     net_income = _value(records, "net_income")
     operating_cash_flow = _value(records, "operating_cash_flow")
     if net_income and operating_cash_flow is not None and net_income > 0:
         cash_quality = operating_cash_flow / net_income
+        score_cash = (cash_quality - 0.7) / 0.6
         results.append(
             _metric(
                 "现金流/利润",
                 cash_quality,
-                (cash_quality - 0.7) / 0.6,
-                f"经营现金流约为净利润的 {cash_quality:.2f} 倍",
+                score_cash,
+                f"经营现金流约为净利润的 {cash_quality:.2f} 倍 (盈余质量)",
             )
         )
     else:
         results.append(_metric("现金流/利润", None, 0, "缺少同期现金流与净利润"))
 
+    score_safety = 0.0
     assets = _value(records, "assets")
     liabilities = _value(records, "liabilities")
     if assets and liabilities is not None:
         liability_ratio = liabilities / assets
+        score_safety = (0.65 - liability_ratio) / 0.35
         results.append(
             _metric(
                 "资产负债率",
                 liability_ratio,
-                (0.65 - liability_ratio) / 0.35,
+                score_safety,
                 f"资产负债率 {liability_ratio:.1%}；金融企业需结合行业口径解释",
             )
         )
     else:
         debt_to_equity = _value(records, "debt_to_equity")
         if debt_to_equity is not None:
+            score_safety = (1.0 - debt_to_equity) / 1.5
             results.append(
                 _metric(
                     "债务/权益",
                     debt_to_equity,
-                    (1.0 - debt_to_equity) / 1.5,
+                    score_safety,
                     f"债务权益比 {debt_to_equity:.2f}",
                 )
             )
         else:
             results.append(_metric("杠杆", None, 0, "缺少可比较杠杆数据"))
 
+    score_payout = 0.0
     dividend = _value(records, "dividend_yield")
     if dividend is not None:
+        score_payout = (dividend - 0.02) / 0.04
         results.append(
             _metric(
                 "股息率",
                 dividend,
-                (dividend - 0.02) / 0.04,
+                score_payout,
                 f"近端股息率 {dividend:.1%}，仍需验证现金来源与持续性",
             )
         )
     else:
         results.append(_metric("股息率", None, 0, "缺少股息率"))
+
+    # Composite QMJ score (Asness, Frazzini, Pedersen, 2019)
+    valid_components = sum(
+        1
+        for val in (
+            roe,
+            operating_cash_flow,
+            liabilities or _value(records, "debt_to_equity"),
+            dividend,
+        )
+        if val is not None
+    )
+    if valid_components >= 2:
+        qmj_score = _clip(
+            0.35 * score_prof + 0.25 * score_cash + 0.25 * score_safety + 0.15 * score_payout
+        )
+        results.append(
+            _metric(
+                "QMJ复合质量",
+                qmj_score,
+                qmj_score,
+                f"Asness(2019)质量四维度(盈利/现金/安全/回报)复合得分 {qmj_score:+.2f}",
+            )
+        )
+
     return results
 
 
