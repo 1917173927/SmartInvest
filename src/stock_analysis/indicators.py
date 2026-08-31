@@ -41,9 +41,9 @@ def _wilson_interval(successes: int, trials: int) -> tuple[float | None, float |
     proportion = successes / trials
     denominator = 1 + z**2 / trials
     center = (proportion + z**2 / (2 * trials)) / denominator
-    margin = z * math.sqrt(
-        proportion * (1 - proportion) / trials + z**2 / (4 * trials**2)
-    ) / denominator
+    margin = (
+        z * math.sqrt(proportion * (1 - proportion) / trials + z**2 / (4 * trials**2)) / denominator
+    )
     return max(0.0, center - margin), min(1.0, center + margin)
 
 
@@ -188,9 +188,7 @@ def detect_price_zones(
         if touches < 2:
             continue
         weights = [float(item["weight"]) for item in cluster]
-        center = float(
-            np.average([float(item["price"]) for item in cluster], weights=weights)
-        )
+        center = float(np.average([float(item["price"]) for item in cluster], weights=weights))
         raw_strength = sum(weights) * math.log1p(touches)
         strength = float(np.clip(1 - math.exp(-raw_strength / 4), 0, 1))
         half_width = tolerance * min(0.75, 0.35 + touches * 0.04)
@@ -307,9 +305,7 @@ def macro_assessments(
         score = float(np.clip(np.tanh(momentum * 20), -1, 1))
         direction = -1.0 if str(series) in {"DXY", "US10Y", "SHIBOR"} else 1.0
         adjusted = float(np.clip(score * direction, -1, 1))
-        exposure = float(
-            exposures.get(str(series), 0.0) if exposures is not None else 1.0
-        )
+        exposure = float(exposures.get(str(series), 0.0) if exposures is not None else 1.0)
         assessments.append(
             {
                 "name": str(series),

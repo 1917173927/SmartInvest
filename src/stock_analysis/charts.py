@@ -247,9 +247,7 @@ def render_probability_chart(package: AnalysisPackage, output_path: Path) -> Pat
     # Directional probability is interpolated only for visual continuity; the
     # actual model outputs remain the five annotated horizon anchors.
     probability_axis = axis.twinx()
-    probability_days = np.array(
-        [0.0, *[float(item.horizon_days) for item in package.forecasts]]
-    )
+    probability_days = np.array([0.0, *[float(item.horizon_days) for item in package.forecasts]])
     probability_values = np.array(
         [0.5, *[float(item.ensemble.up_probability) for item in package.forecasts]]
     )

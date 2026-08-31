@@ -230,155 +230,15 @@ def organize_reports(config: AppConfig) -> list[Path]:
 
 
 def render_summary_markdown(config: AppConfig, summary: AutomationSummary) -> str:
-    portfolio_name = summary.portfolio_report.name if summary.portfolio_report else "未生成"
-    portfolio_link = f"组合/{portfolio_name}" if summary.portfolio_report else ""
-    log_name = f"{summary.as_of.isoformat()}-{summary.run_id}.md"
-    lines = [
-        "---",
-        "type: automated-summary",
-        f"date: {summary.as_of.isoformat()}",
-        "status: generated",
-        "---",
-        "",
-        f"# 自动分析摘要（{summary.as_of.isoformat()}）",
-        "",
-        "> 根目录只保留本摘要；详细证据、模型输出和回测结果已按类别归档。",
-        "",
-        "## 重要结论",
-        "",
-        "| 标的 | 数据 | 宏观 | 短线 | 中线 | 长线 | 价值 | 详细报告 |",
-        "|---|---|---:|---|---|---|---|---|",
-    ]
-    for symbol in summary.symbols:
-        safe = symbol.replace(":", "-").replace("/", "-")
-        name = safe_filename_component(str(config.asset(symbol).get("name", symbol)))
-        actions = summary.highlights.get(symbol, {})
-        metrics = summary.decision_scores.get(symbol, {})
-        short = _summary_decision(actions, metrics.get("short"), "short")
-        medium = _summary_decision(actions, metrics.get("medium"), "medium")
-        long = _summary_decision(actions, metrics.get("long"), "long")
-        value = _summary_decision(actions, metrics.get("value"), "value")
-        report = f"个股/{safe}/{summary.as_of.isoformat()}-{safe}-{name}-all.md"
-        lines.append(
-            f"| {name}（{symbol}） | {summary.data_quality.get(symbol, '—')} | "
-            f"{summary.macro_scores.get(symbol, 0):+.2f} | {short} | {medium} | {long} | {value} | "
-            f"[{safe}](<{report}>) |"
-        )
-    lines.extend(["", f"- 成功：{len(summary.succeeded)} 个；失败：{len(summary.failed)} 个"])
-    if summary.failed:
-        lines.append(
-            "- 失败标的：" + "；".join(f"{key}（{value}）" for key, value in summary.failed.items())
-        )
-    failed_tasks = [item for item in summary.tasks if item["status"] == "failed"]
-    lines.extend(
-        [
-            f"- 到期回执核对：{summary.evaluated_receipts} 条",
-            f"- 自动校准：{sum(len(items) for items in summary.calibrated.values())} 个期限",
-            f"- 组合检查：[{portfolio_name}]({portfolio_link})",
-            "",
-            "## 运行状态",
-            "",
-            f"- 任务总数：{len(summary.tasks)}；执行 "
-            f"{sum(item['status'] == 'executed' for item in summary.tasks)}；"
-            f"跳过 {sum(item['status'] == 'skipped' for item in summary.tasks)}；"
-            f"失败 {sum(item['status'] == 'failed' for item in summary.tasks)}",
-            f"- 完整审计日志：[{summary.run_id}](<运行日志/{log_name}>)",
-            "",
-            "### 需要关注的失败任务",
-            "",
-            "",
-            "## 使用方式",
-            "",
-            "- 先读本页的重要结论，再按需打开个股或回测详细报告；任务明细见运行日志。",
-            "- 任何动作仍需检查数据质量、回撤预算和失效条件；本系统不会自动下单。",
-            "",
-        ]
-    )
-    if failed_tasks:
-        insert_at = lines.index("### 需要关注的失败任务") + 1
-        lines[insert_at:insert_at] = [
-            "",
-            "| 标的 | 任务 | 原因 |",
-            "|---|---|---|",
-            *[
-                f"| {item['symbol']} | {item['task']} | {item['reason']} |"
-                for item in failed_tasks
-            ],
-        ]
-    else:
-        insert_at = lines.index("### 需要关注的失败任务") + 1
-        lines.insert(insert_at, "- 无失败任务。")
-    if summary.calibration_progress:
-        marker = "## 运行状态"
-        progress_rows = []
-        for symbol, horizons in summary.calibration_progress.items():
-            active = [days for days, info in horizons.items() if info.get("status") == "active"]
-            experimental = [
-                days for days, info in horizons.items() if info.get("status") == "experimental"
-            ]
-            progress_rows.append(
-                f"| {symbol} | {', '.join(f'{days}日' for days in active) or '—'} | "
-                f"{', '.join(f'{days}日' for days in experimental) or '—'} |"
-            )
-        progress_lines = [
-            "## 校准进度",
-            "",
-            "| 标的 | 已激活期限 | 实验/待校准期限 |",
-            "|---|---|---|",
-            *progress_rows,
-            "",
-        ]
-        lines[lines.index(marker):lines.index(marker)] = progress_lines
-    return "\n".join(lines)
+    from stock_analysis.renderers import render_summary_markdown as _render
 
-
-def _summary_decision(
-    actions: dict[str, str], metrics: dict[str, float] | None, horizon: str
-) -> str:
-    """Keep the root summary actionable without hiding score uncertainty."""
-    action = actions.get(horizon, "—")
-    if not metrics:
-        return action
-    return f"{action}<br>评分 {metrics['score']:+.2f} / 置信 {metrics['confidence']:.0%}"
+    return _render(config, summary)
 
 
 def render_task_log(summary: AutomationSummary) -> str:
-    """Render verbose task details outside the human-facing summary page."""
-    lines = [
-        "---",
-        "type: automated-run-log",
-        f"date: {summary.as_of.isoformat()}",
-        f"run_id: {summary.run_id}",
-        "---",
-        "",
-        f"# 自动运行日志（{summary.as_of.isoformat()} / {summary.run_id}）",
-        "",
-        "| 标的 | 任务 | 状态 | 原因 |",
-        "|---|---|---|---|",
-        *[
-            f"| {item['symbol']} | {item['task']} | {item['status']} | {item['reason']} |"
-            for item in summary.tasks
-        ],
-        "",
-        f"- 成功标的：{len(summary.succeeded)}；失败标的：{len(summary.failed)}",
-    ]
-    if summary.calibration_progress:
-        lines.extend(
-            [
-                "",
-                "## 逐期限校准进度",
-                "",
-                "| 标的 | 期限 | 样本 | 状态 |",
-                "|---|---:|---:|---|",
-                *[
-                    f"| {symbol} | {days}日 | {info.get('samples', 0)}/{info.get('target', 0)} | "
-                    f"{info.get('status', 'unknown')} |"
-                    for symbol, horizons in summary.calibration_progress.items()
-                    for days, info in horizons.items()
-                ],
-            ]
-        )
-    return "\n".join(lines)
+    from stock_analysis.renderers import render_task_log as _render
+
+    return _render(summary)
 
 
 def run_automation(
@@ -755,10 +615,7 @@ def run_automation(
                     data_quality=data_quality,
                     data_warnings=list(
                         dict.fromkeys(
-                            sync_warnings
-                            + context.warnings
-                            + return_warnings
-                            + quality_warnings
+                            sync_warnings + context.warnings + return_warnings + quality_warnings
                         )
                     ),
                     forecasts=forecasts,

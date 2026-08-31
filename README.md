@@ -81,6 +81,9 @@ LLM 只能生成白名单事件，且事件生效日不得早于证据发布日�
 ## 命令
 
 - `stock doctor`：检查配置、数据库、可选依赖与 API。
+- `stock dash`：终端实时多周期决策与资产配置总览看板。
+- `stock add SYMBOL`：向导式添加并配置新标的，支持设定行业、角色、估值模型与基准倍数并自动同步历史。
+- `stock scenario SYMBOL`：What-If 敏感性情景推演，分析盈利预期调整、估值变化与安全边际对买入底线的影响。
 - `stock sync SYMBOL`：按需同步原始日线、公司行动和可用财务事实。
 - `stock backfill`：分块获取接口可提供的最早历史并安全 upsert；`--recent --years 10` 可限制范围。
 - `stock analyze SYMBOL --horizon short|medium|long|value|all`：生成分析与预测回执。

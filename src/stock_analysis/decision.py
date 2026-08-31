@@ -1,21 +1,19 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
-from collections import defaultdict
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel, Field
 
 from stock_analysis.data import AppConfig, Database, DataQuality, FundamentalRecord, utc_now
-from stock_analysis.forecast import ForecastBundle, ModelStatus
+from stock_analysis.forecast import ForecastBundle
 from stock_analysis.indicators import (
     PriceZone,
     PriceZoneValidation,
@@ -299,51 +297,210 @@ def quality_assessments(records: dict[str, FundamentalRecord]) -> list[MetricAss
     return results
 
 
+class ValuationStrategy(Protocol):
+    """Protocol for asset/industry specific valuation models."""
+
+    name: str
+
+    def assessments(
+        self, records: dict[str, FundamentalRecord], profile: dict[str, Any]
+    ) -> list[MetricAssessment]: ...
+
+    def range(
+        self,
+        *,
+        current_price: float,
+        currency: str,
+        records: dict[str, FundamentalRecord],
+        profile: dict[str, Any],
+        override_low: float | None = None,
+        override_high: float | None = None,
+    ) -> ValuationRange: ...
+
+
+class BaseValuationStrategy:
+    name: str = "generic"
+    default_fair_pe: float = 15.0
+    default_fair_pb: float = 1.5
+    pb_multiplier: float = 1.0
+    fair_width: float = 0.25
+    safety_margin: float = 0.30
+
+    def assessments(
+        self, records: dict[str, FundamentalRecord], profile: dict[str, Any]
+    ) -> list[MetricAssessment]:
+        results: list[MetricAssessment] = []
+        pe = _value(records, "pe")
+        pb = _value(records, "pb")
+        dividend = _value(records, "dividend_yield")
+        fair_pe = float(profile.get("fair_pe", self.default_fair_pe))
+        fair_pb = float(profile.get("fair_pb", self.default_fair_pb))
+        if pe is not None and pe > 0:
+            results.append(
+                _metric(
+                    "PE",
+                    pe,
+                    (fair_pe / pe - 1) * 1.5,
+                    f"PE {pe:.2f} 倍，对照保守参考 {fair_pe:.2f} 倍",
+                )
+            )
+        else:
+            results.append(_metric("PE", None, 0, "盈利为负或缺少 PE，不能据此判定便宜"))
+        if pb is not None and pb > 0:
+            results.append(
+                _metric(
+                    "PB",
+                    pb,
+                    (fair_pb / pb - 1) * self.pb_multiplier,
+                    f"PB {pb:.2f} 倍，对照保守参考 {fair_pb:.2f} 倍",
+                )
+            )
+        else:
+            results.append(_metric("PB", None, 0, "缺少 PB"))
+        if dividend is not None:
+            results.append(
+                _metric(
+                    "股息安全垫",
+                    dividend,
+                    (dividend - 0.025) / 0.035,
+                    f"股息率 {dividend:.1%}；不等同于分红可持续",
+                )
+            )
+        else:
+            results.append(_metric("股息安全垫", None, 0, "缺少股息率"))
+        return results
+
+    def range(
+        self,
+        *,
+        current_price: float,
+        currency: str,
+        records: dict[str, FundamentalRecord],
+        profile: dict[str, Any],
+        override_low: float | None = None,
+        override_high: float | None = None,
+    ) -> ValuationRange:
+        if override_low is not None and override_high is not None:
+            if override_low <= 0 or override_high < override_low:
+                raise ValueError("人工合理价值区间无效")
+            margin = 0.25
+            return ValuationRange(
+                available=True,
+                fair_low=override_low,
+                fair_high=override_high,
+                buy_low=override_low * (1 - margin),
+                buy_high=override_low,
+                currency=currency,
+                method="人工合理价值区间 + 25% 安全边际",
+            )
+        estimates: list[float] = []
+        methods: list[str] = []
+        pe = _value(records, "pe")
+        pb = _value(records, "pb")
+        fair_pe = profile.get("fair_pe", self.default_fair_pe)
+        fair_pb = profile.get("fair_pb", self.default_fair_pb)
+        if pe and pe > 0 and fair_pe:
+            estimates.append(current_price * float(fair_pe) / pe)
+            methods.append("PE")
+        if pb and pb > 0 and fair_pb:
+            estimates.append(current_price * float(fair_pb) / pb)
+            methods.append("PB")
+        if not estimates:
+            return ValuationRange(
+                available=False,
+                currency=currency,
+                method="缺少 EPS/BVPS、PE/PB 或人工价值区间，拒绝伪造买入价",
+            )
+        central = float(np.median(estimates))
+        fair_low = central * (1 - self.fair_width)
+        fair_high = central * (1 + self.fair_width)
+        return ValuationRange(
+            available=True,
+            fair_low=fair_low,
+            fair_high=fair_high,
+            buy_low=fair_low * (1 - self.safety_margin),
+            buy_high=fair_low,
+            currency=currency,
+            method="/".join(methods) + f" 隐含盈利/净资产情景，{self.safety_margin:.0%} 安全边际",
+        )
+
+
+class BankValuationStrategy(BaseValuationStrategy):
+    name = "bank"
+    default_fair_pe = 7.0
+    default_fair_pb = 0.75
+    pb_multiplier = 1.4
+    fair_width = 0.20
+    safety_margin = 0.20
+
+
+class InsurerValuationStrategy(BaseValuationStrategy):
+    name = "insurer"
+    default_fair_pe = 9.0
+    default_fair_pb = 1.10
+    pb_multiplier = 1.4
+    fair_width = 0.20
+    safety_margin = 0.20
+
+
+class CyclicalValuationStrategy(BaseValuationStrategy):
+    name = "cyclical"
+    default_fair_pe = 10.0
+    default_fair_pb = 1.50
+    pb_multiplier = 1.0
+    fair_width = 0.30
+    safety_margin = 0.30
+
+
+class FundValuationStrategy(BaseValuationStrategy):
+    name = "fund"
+    fair_width = 0.15
+    safety_margin = 0.15
+
+    def assessments(
+        self, records: dict[str, FundamentalRecord], profile: dict[str, Any]
+    ) -> list[MetricAssessment]:
+        pe = _value(records, "pe")
+        pb = _value(records, "pb")
+        results: list[MetricAssessment] = []
+        if pe is not None and pe > 0:
+            fair_pe = float(profile.get("fair_pe", 15.0))
+            score = (fair_pe / pe - 1) * 1.0
+            results.append(_metric("PE", pe, score, f"底层指数/资产估算 PE {pe:.2f}"))
+        else:
+            results.append(_metric("PE", None, 0, "公募/ETF基金主要跟踪底层资产净值"))
+        if pb is not None and pb > 0:
+            fair_pb = float(profile.get("fair_pb", 1.5))
+            score = (fair_pb / pb - 1) * 1.0
+            results.append(_metric("PB", pb, score, f"底层指数/资产估算 PB {pb:.2f}"))
+        else:
+            results.append(_metric("PB", None, 0, "公募/ETF基金主要跟踪底层资产净值"))
+        return results
+
+
+class GenericValuationStrategy(BaseValuationStrategy):
+    name = "generic"
+
+
+VALUATION_STRATEGIES: dict[str, BaseValuationStrategy] = {
+    "bank": BankValuationStrategy(),
+    "insurer": InsurerValuationStrategy(),
+    "cyclical": CyclicalValuationStrategy(),
+    "fund": FundValuationStrategy(),
+    "generic": GenericValuationStrategy(),
+}
+
+
+def get_valuation_strategy(model_name: str | None) -> BaseValuationStrategy:
+    key = str(model_name).lower() if model_name else "generic"
+    return VALUATION_STRATEGIES.get(key, VALUATION_STRATEGIES["generic"])
+
+
 def valuation_assessments(
     records: dict[str, FundamentalRecord], profile: dict[str, Any]
 ) -> list[MetricAssessment]:
-    results: list[MetricAssessment] = []
-    pe = _value(records, "pe")
-    pb = _value(records, "pb")
-    dividend = _value(records, "dividend_yield")
-    fair_pe = float(profile.get("fair_pe", 15.0))
-    fair_pb = float(profile.get("fair_pb", 1.5))
-    model = str(profile.get("valuation_model", "generic"))
-    if pe is not None and pe > 0:
-        results.append(
-            _metric(
-                "PE",
-                pe,
-                (fair_pe / pe - 1) * 1.5,
-                f"PE {pe:.2f} 倍，对照保守参考 {fair_pe:.2f} 倍",
-            )
-        )
-    else:
-        results.append(_metric("PE", None, 0, "盈利为负或缺少 PE，不能据此判定便宜"))
-    if pb is not None and pb > 0:
-        multiplier = 1.4 if model in {"bank", "insurer"} else 1.0
-        results.append(
-            _metric(
-                "PB",
-                pb,
-                (fair_pb / pb - 1) * multiplier,
-                f"PB {pb:.2f} 倍，对照保守参考 {fair_pb:.2f} 倍",
-            )
-        )
-    else:
-        results.append(_metric("PB", None, 0, "缺少 PB"))
-    if dividend is not None:
-        results.append(
-            _metric(
-                "股息安全垫",
-                dividend,
-                (dividend - 0.025) / 0.035,
-                f"股息率 {dividend:.1%}；不等同于分红可持续",
-            )
-        )
-    else:
-        results.append(_metric("股息安全垫", None, 0, "缺少股息率"))
-    return results
+    strategy = get_valuation_strategy(profile.get("valuation_model"))
+    return strategy.assessments(records, profile)
 
 
 def valuation_range(
@@ -355,51 +512,14 @@ def valuation_range(
     override_low: float | None = None,
     override_high: float | None = None,
 ) -> ValuationRange:
-    if override_low is not None and override_high is not None:
-        if override_low <= 0 or override_high < override_low:
-            raise ValueError("人工合理价值区间无效")
-        margin = 0.25
-        return ValuationRange(
-            available=True,
-            fair_low=override_low,
-            fair_high=override_high,
-            buy_low=override_low * (1 - margin),
-            buy_high=override_low,
-            currency=currency,
-            method="人工合理价值区间 + 25% 安全边际",
-        )
-    estimates: list[float] = []
-    methods: list[str] = []
-    pe = _value(records, "pe")
-    pb = _value(records, "pb")
-    fair_pe = profile.get("fair_pe")
-    fair_pb = profile.get("fair_pb")
-    if pe and pe > 0 and fair_pe:
-        estimates.append(current_price * float(fair_pe) / pe)
-        methods.append("PE")
-    if pb and pb > 0 and fair_pb:
-        estimates.append(current_price * float(fair_pb) / pb)
-        methods.append("PB")
-    if not estimates:
-        return ValuationRange(
-            available=False,
-            currency=currency,
-            method="缺少 EPS/BVPS、PE/PB 或人工价值区间，拒绝伪造买入价",
-        )
-    central = float(np.median(estimates))
-    model = str(profile.get("valuation_model", "generic"))
-    width = 0.20 if model in {"bank", "insurer"} else 0.30 if model == "cyclical" else 0.25
-    safety_margin = 0.20 if model in {"bank", "insurer"} else 0.30
-    fair_low = central * (1 - width)
-    fair_high = central * (1 + width)
-    return ValuationRange(
-        available=True,
-        fair_low=fair_low,
-        fair_high=fair_high,
-        buy_low=fair_low * (1 - safety_margin),
-        buy_high=fair_low,
+    strategy = get_valuation_strategy(profile.get("valuation_model"))
+    return strategy.range(
+        current_price=current_price,
         currency=currency,
-        method="/".join(methods) + f" 隐含盈利/净资产情景，{safety_margin:.0%} 安全边际",
+        records=records,
+        profile=profile,
+        override_low=override_low,
+        override_high=override_high,
     )
 
 
@@ -524,15 +644,11 @@ def build_decisions(
         elif horizon is Horizon.LONG:
             forecast = None
             deterministic_score = quality_score * 0.60 + valuation_score * 0.40
-            score = _clip(
-                deterministic_score * 0.65 + macro_score * 0.15 + llm_score * 0.20
-            )
+            score = _clip(deterministic_score * 0.65 + macro_score * 0.15 + llm_score * 0.20)
         else:
             forecast = None
             deterministic_score = quality_score * 0.40 + valuation_score * 0.60
-            score = _clip(
-                deterministic_score * 0.70 + safety_score * 0.20 + llm_score * 0.10
-            )
+            score = _clip(deterministic_score * 0.70 + safety_score * 0.20 + llm_score * 0.10)
         calibration_confidence = 0.4
         warnings: list[str] = []
         if forecast:
@@ -785,218 +901,9 @@ def _fmt_number(value: float | None, digits: int = 2) -> str:
 
 
 def render_analysis_markdown(package: AnalysisPackage) -> str:
-    lines = [
-        "---",
-        "type: automated-stock-analysis",
-        f"symbol: {package.symbol}",
-        f"date: {package.as_of.isoformat()}",
-        f"data_quality: {package.data_quality.value}",
-        "status: generated",
-        "---",
-        "",
-        f"# {package.name}（{package.symbol}）多周期分析",
-        "",
-        "> [!warning] 决策边界",
-        "> 这是概率化研究与纪律检查，不是收益保证或自动交易指令。"
-        "C 级数据、低置信度或模型失配时，系统会留白。",
-        "",
-        "## 结论：多周期冲突卡",
-        "",
-        "| 周期 | 综合分 | 置信度 | 行动 | 目标仓位 |",
-        "|---|---:|---:|---|---:|",
-    ]
-    for item in package.decisions:
-        lines.append(
-            f"| {HORIZON_LABELS[item.horizon]} | {item.score:+.2f} | {item.confidence:.0%} | "
-            f"{item.action} | {_fmt_percent(item.target_position, 0)} |"
-        )
-    lines.extend(
-        [
-            "",
-            "## 数据与价格",
-            "",
-            f"- 分析截止：{package.as_of.isoformat()}",
-            f"- 最新价格：{package.current_price:.3f} {package.currency}",
-            f"- 数据质量：**{package.data_quality.value}**",
-        ]
-    )
-    for warning in package.data_warnings:
-        lines.append(f"- 数据警告：{warning}")
-    if package.chart_paths:
-        lines.extend(["", "## 技术图表", ""])
-        for chart_path in package.chart_paths:
-            chart_label = "概率路径" if "概率" in chart_path else "K线与技术指标"
-            lines.append(f"![{package.name} {chart_label}](<{chart_path}>)")
-    lines.extend(["", "## 支撑与压力", ""])
-    if package.price_zones:
-        lines.extend(
-            [
-                "| 类型 | 区间 | 中心 | 距现价 | 强度分 | 触达 | 最近触达 |",
-                "|---|---:|---:|---:|---:|---:|---|",
-            ]
-        )
-        for zone in package.price_zones:
-            label = "支撑" if zone.kind == "support" else "压力"
-            lines.append(
-                f"| {label} | {zone.low:.2f}–{zone.high:.2f} | {zone.center:.2f} | "
-                f"{zone.distance:+.1%} | {zone.strength * 100:.0f}/100 | {zone.touches} | "
-                f"{zone.last_touch.isoformat()} |"
-            )
-        lines.extend(
-            [
-                "",
-                "> 支撑/压力来自近端局部高低点聚类，并以 ATR、成交量、触达次数和"
-                "时间衰减确定区间与强度；强度分不是守住概率，它们仍可能被跳空、重大事件"
-                "或趋势加速直接击穿。",
-            ]
-        )
-        if package.price_zone_validation:
-            lines.extend(
-                [
-                    "",
-                    "### 样本外检验",
-                    "",
-                    "| 类型 | 可检验窗口 | 实际触达 | 守住 | 守住率 | 95% 区间 | 状态 |",
-                    "|---|---:|---:|---:|---:|---:|---|",
-                ]
-            )
-            for validation in package.price_zone_validation:
-                label = "支撑" if validation.kind == "support" else "压力"
-                rate = (
-                    f"{validation.hold_rate:.0%}"
-                    if validation.hold_rate is not None
-                    else "—"
-                )
-                interval = (
-                    f"{validation.confidence_low:.0%}–{validation.confidence_high:.0%}"
-                    if validation.confidence_low is not None
-                    and validation.confidence_high is not None
-                    else "—"
-                )
-                status = "可参考" if validation.status == "validated" else "样本不足"
-                lines.append(
-                    f"| {label} | {validation.windows} | {validation.touched} | "
-                    f"{validation.held} | {rate} | {interval} | {status} |"
-                )
-            lines.extend(
-                [
-                    "",
-                    "> 检验严格使用每个历史截止点之前的数据重新识别区间；只有未来真正触达"
-                    "该区间的样本才进入守住率，少于 20 次触达不把百分比当作可靠概率。",
-                ]
-            )
-    else:
-        lines.append("- 历史枢轴不足，暂不生成支撑/压力区间。")
-    lines.extend(
-        [
-            "",
-            "## 概率预测",
-            "",
-            "| 期限 | 状态 | 基线/Chronos 权重 | Q10 | 中位数 | Q90 | 上涨概率 | 潜在回撤 |",
-            "|---:|---|---|---:|---:|---:|---:|---:|",
-        ]
-    )
-    degraded_horizons: list[int] = []
-    for bundle in package.forecasts:
-        weight_text = "/".join(f"{name} {weight:.1%}" for name, weight in bundle.weights.items())
-        estimate = bundle.ensemble
-        status_text = (
-            f"{bundle.status.value} ({bundle.calibration_samples}/{bundle.calibration_target})"
-        )
-        lines.append(
-            f"| {bundle.horizon_days}日 | {status_text} | {weight_text} | "
-            f"{estimate.q10:+.1%} | {estimate.q50:+.1%} | {estimate.q90:+.1%} | "
-            f"{estimate.up_probability:.0%} | {estimate.potential_drawdown:.1%} |"
-        )
-        if bundle.status in {ModelStatus.DEGRADED, ModelStatus.DISABLED}:
-            degraded_horizons.append(bundle.horizon_days)
-    if not package.forecasts:
-        lines.append("| — | 长期/价值模式不使用价格路径预测 | — | — | — | — | — | — |")
-    if degraded_horizons:
-        lines.extend(
-            [
-                "",
-                "> [!warning] "
-                + "、".join(f"{days}日" for days in degraded_horizons)
-                + "预测当前仅使用随机游走基线；Chronos 未参与，结果仅作保守参考。",
-            ]
-        )
-    lines.extend(["", "## 企业质量与估值", ""])
-    lines.append("| 类别 | 指标 | 数值 | 评分 | 说明 |")
-    lines.append("|---|---|---:|---:|---|")
-    for category, items in (
-        ("质量", package.quality),
-        ("估值", package.valuation),
-        ("市场", package.technical),
-        ("宏观", package.macro),
-    ):
-        for item in items:
-            value = _fmt_number(item.value) if item.available else "—"
-            lines.append(
-                f"| {category} | {item.name} | {value} | {item.score:+.2f} | {item.explanation} |"
-            )
-    value_range = package.valuation_range
-    lines.extend(["", "### 合理价值与安全边际", ""])
-    if value_range.available:
-        lines.extend(
-            [
-                f"- 合理价值区间：{value_range.fair_low:.2f}–"
-                f"{value_range.fair_high:.2f} {value_range.currency}",
-                f"- 分批买入观察区间：{value_range.buy_low:.2f}–"
-                f"{value_range.buy_high:.2f} {value_range.currency}",
-                f"- 方法：{value_range.method}",
-            ]
-        )
-    else:
-        lines.append(f"- 暂不生成价格区间：{value_range.method}")
-    lines.extend(["", "## LLM 证据与事件", "", package.research.summary, ""])
-    if package.research.events:
-        lines.extend(
-            [
-                "| 类型 | 方向 | 强度 | 置信度 | 生效/失效 | 证据 |",
-                "|---|---:|---:|---:|---|---|",
-            ]
-        )
-        for event in package.research.events:
-            lines.append(
-                f"| {event.event_type.value} | {event.direction:+d} | {event.strength:.0%} | "
-                f"{event.confidence:.0%} | {event.effective_from}/{event.expires_at} | "
-                f"{event.evidence_id} |"
-            )
-    else:
-        lines.append("- 没有通过证据和日期校验的 LLM 事件因子。")
-    if package.research.evidence:
-        lines.extend(["", "证据索引："])
-        for item in package.research.evidence:
-            lines.append(
-                f"- [{item.id}] [{item.title}]({item.source_url})，发布于 {item.published_at}"
-            )
-    lines.extend(["", "## 行动计划与反证", ""])
-    for decision in package.decisions:
-        lines.extend(
-            [
-                f"### {HORIZON_LABELS[decision.horizon]}",
-                "",
-                f"- 行动：**{decision.action}**",
-                f"- 依据：{decision.rationale}",
-            ]
-        )
-        if decision.staging:
-            lines.append(f"- 分批：{decision.staging}")
-        if decision.target_position is not None:
-            lines.append(f"- 目标仓位上限：{decision.target_position:.0%}")
-        for condition in decision.invalidation_conditions:
-            lines.append(f"- 反证条件：{condition}")
-        for warning in decision.warnings:
-            lines.append(f"- 警告：{warning}")
-        lines.append("")
-    lines.extend(["## 预测回执", ""])
-    if package.receipt_ids:
-        lines.extend(f"- `{receipt_id}`" for receipt_id in package.receipt_ids)
-    else:
-        lines.append("- 本次没有短中期预测，因此未创建预测回执。")
-    lines.append("")
-    return "\n".join(lines)
+    from stock_analysis.renderers import render_analysis_markdown as _render
+
+    return _render(package)
 
 
 def _parse_number(text: str) -> float:
@@ -1079,75 +986,6 @@ def position_weight(snapshot: PortfolioSnapshot, symbol: str) -> float | None:
 def render_portfolio_markdown(
     snapshot: PortfolioSnapshot, config: AppConfig, database: Database
 ) -> str:
-    risk = config.section("risk")
-    sector_values: dict[str, float] = defaultdict(float)
-    for item in snapshot.positions:
-        sector_values[item.sector] += item.market_value
-    total = snapshot.total_cny_assets or sum(item.market_value for item in snapshot.positions)
-    cash_weight = snapshot.cash_cny / total if snapshot.cash_cny is not None and total else None
-    lines = [
-        "---",
-        "type: automated-portfolio-analysis",
-        f"date: {date.today().isoformat()}",
-        f"snapshot_date: {snapshot.as_of.isoformat()}",
-        "status: generated",
-        "---",
-        "",
-        f"# {snapshot.as_of.isoformat()} 持仓自动检查",
-        "",
-        f"来源：[[{snapshot.path.relative_to(config.home).with_suffix('')}]]",
-        "",
-        "## 硬约束检查",
-        "",
-        "| 标的 | 角色 | 市值 | 组合占比 | 上限 | 结论 |",
-        "|---|---|---:|---:|---:|---|",
-    ]
-    for item in snapshot.positions:
-        weight = item.market_value / total if total else 0.0
-        limit = float(
-            risk.get("core_position_limit", 0.35)
-            if item.role == "core"
-            else risk.get("satellite_position_limit", 0.15)
-        )
-        conclusion = "超限，停止加仓并复核" if weight > limit else "合规"
-        lines.append(
-            f"| {item.name} | {item.role} | {item.market_value:,.2f} CNY | "
-            f"{weight:.1%} | {limit:.0%} | {conclusion} |"
-        )
-    lines.extend(["", "### 行业与现金", ""])
-    sector_limit = float(risk.get("sector_limit", 0.60))
-    for sector, market_value in sorted(
-        sector_values.items(), key=lambda item: item[1], reverse=True
-    ):
-        weight = market_value / total if total else 0.0
-        conclusion = "超限" if weight > sector_limit else "合规"
-        lines.append(f"- {sector}：{weight:.1%}（上限 {sector_limit:.0%}，{conclusion}）")
-    if cash_weight is not None:
-        cash_floor = float(risk.get("cash_floor", 0.05))
-        conclusion = "低于底线" if cash_weight < cash_floor else "合规"
-        lines.append(f"- 现金类：{cash_weight:.1%}（底线 {cash_floor:.0%}，{conclusion}）")
-    lines.extend(["", "## 最近预测回执", ""])
-    for item in snapshot.positions:
-        if not item.symbol:
-            continue
-        rows = database.receipts(symbol=item.symbol)[-5:]
-        if not rows:
-            lines.append(f"- {item.name}：没有预测回执")
-            continue
-        states: list[str] = []
-        for row in rows:
-            decision = json.loads(row["decision_json"])
-            states.append(
-                f"{row['horizon_days']}日 {decision.get('action', '—')} ({row['status']})"
-            )
-        lines.append(f"- {item.name}：" + "；".join(states))
-    lines.extend(["", "## 数据边界", ""])
-    lines.extend(f"- {warning}" for warning in snapshot.warnings)
-    lines.extend(
-        [
-            "- 组合检查执行仓位纪律，不因模型短期看多而放宽单股、行业或现金约束。",
-            "- 本报告不包含自动下单。",
-            "",
-        ]
-    )
-    return "\n".join(lines)
+    from stock_analysis.renderers import render_portfolio_markdown as _render
+
+    return _render(snapshot, config, database)

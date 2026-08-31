@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from stock_analysis.charts import render_probability_chart, render_stock_chart
-from stock_analysis.context import _news_items
+from stock_analysis.context import _news_items, refresh_news
 from stock_analysis.data import Database, DataQuality
 from stock_analysis.decision import AnalysisPackage, ValuationRange
 from stock_analysis.forecast import ForecastBundle, ForecastEstimate, ModelStatus
@@ -132,6 +132,41 @@ def test_news_requires_a_parseable_publication_date() -> None:
     items = _news_items(valid, "CN:601318", date(2026, 8, 1), date(2026, 8, 31))
     assert [item["title"] for item in items] == ["公司发布公告"]
     assert items[0]["source_url"] == "https://example.test/news"
+
+
+def test_news_refresh_reports_cache_age_when_provider_fails(tmp_path, monkeypatch) -> None:
+    import akshare as ak
+
+    with Database(tmp_path / "analysis.sqlite3") as database:
+        database.upsert_news(
+            [
+                {
+                    "id": "news-fixture",
+                    "symbol": "CN:601318",
+                    "title": "历史公告",
+                    "summary": "可回查内容",
+                    "source": "fixture",
+                    "source_url": "https://example.test/news",
+                    "published_at": "2026-08-20",
+                    "content_hash": "hash-fixture",
+                }
+            ]
+        )
+        monkeypatch.setattr(
+            ak,
+            "stock_news_em",
+            lambda **_: (_ for _ in ()).throw(RuntimeError("proxy down")),
+        )
+        result = refresh_news(
+            database,
+            symbol="CN:601318",
+            start=date(2026, 8, 1),
+            end=date(2026, 8, 31),
+            force=True,
+        )
+    assert "news-cache" in result.skipped
+    assert result.news_count == 1
+    assert any("陈旧 11 天" in warning for warning in result.warnings)
 
 
 def test_macro_storage_and_scoring_are_point_in_time(tmp_path) -> None:

@@ -24,6 +24,8 @@ from stock_analysis.data import (
     AkShareProvider,
     AppConfig,
     Database,
+    DataQuality,
+    FundamentalRecord,
     Instrument,
     YFinanceProvider,
     backfill_symbol,
@@ -37,8 +39,10 @@ from stock_analysis.decision import (
     HORIZON_LABELS,
     AnalysisPackage,
     Horizon,
+    HorizonDecision,
     analyze_package,
     create_receipts,
+    get_valuation_strategy,
     latest_portfolio_snapshot,
     position_weight,
     render_analysis_markdown,
@@ -174,9 +178,9 @@ def doctor() -> None:
     except sqlite3.OperationalError:
         checks.append(("SQLite FTS5", "WARN", "将降级为 LIKE 检索"))
     news_count = database.connection.execute("SELECT count(*) FROM news_items").fetchone()[0]
-    macro_count = database.connection.execute(
-        "SELECT count(*) FROM macro_observations"
-    ).fetchone()[0]
+    macro_count = database.connection.execute("SELECT count(*) FROM macro_observations").fetchone()[
+        0
+    ]
     run_count = database.connection.execute("SELECT count(*) FROM automation_runs").fetchone()[0]
     checks.extend(
         [
@@ -470,11 +474,7 @@ def analyze_command(
                 )
                 render_probability_chart(
                     package,
-                    config.reports_dir
-                    / "个股"
-                    / safe_symbol
-                    / "charts"
-                    / probability_name,
+                    config.reports_dir / "个股" / safe_symbol / "charts" / probability_name,
                 )
                 package.chart_paths.append(f"charts/{probability_name}")
         except Exception as exc:
@@ -704,12 +704,333 @@ def calibrate_command(
             failures[canonical] = str(exc)
     database.close()
     console.print_json(
-        json.dumps(
-            {"results": results, "failed": failures}, ensure_ascii=False, default=str
-        )
+        json.dumps({"results": results, "failed": failures}, ensure_ascii=False, default=str)
     )
     if failures and not results:
         raise typer.Exit(1)
+
+
+@app.command("add")
+def add_command(
+    symbol: Annotated[str, typer.Argument(help="标准证券代码，如 CN:600519、HK:00700、US:NVDA")],
+    name: Annotated[str | None, typer.Option(help="资产名称，如 贵州茅台")] = None,
+    sector: Annotated[str | None, typer.Option(help="所属行业，如 消费、金融、科技")] = None,
+    role: Annotated[
+        str, typer.Option(help="组合角色：core (核心) / satellite (卫星)")
+    ] = "satellite",
+    valuation_model: Annotated[
+        str, typer.Option(help="估值模型：generic/bank/insurer/cyclical/fund")
+    ] = "generic",
+    fair_pe: Annotated[float | None, typer.Option(help="保守合理 PE 参考")] = None,
+    fair_pb: Annotated[float | None, typer.Option(help="保守合理 PB 参考")] = None,
+    sync: Annotated[
+        bool, typer.Option("--sync/--no-sync", help="添加后是否立即同步历史数据")
+    ] = True,
+    dry_run: Annotated[bool, typer.Option(help="仅预览配置而不写入文件")] = False,
+) -> None:
+    """向导式添加新标的，校验参数、写入配置并自动同步历史数据。"""
+    config, database = _context()
+    try:
+        instrument = Instrument.parse(symbol)
+    except Exception as exc:
+        console.print(f"[red]代码格式错误：{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    canonical = instrument.canonical
+    display_name = name or canonical
+    assigned_sector = sector or "未分类"
+    normalized_role = role.lower()
+    if normalized_role not in {"core", "satellite"}:
+        raise typer.BadParameter("role 必须是 core 或 satellite")
+    normalized_model = valuation_model.lower()
+
+    toml_path = config.home / "stock-analysis.toml"
+    existing_text = toml_path.read_text(encoding="utf-8") if toml_path.exists() else ""
+    if f'[assets."{canonical}"]' in existing_text:
+        console.print(f"[yellow]标的 {canonical} 已存在于配置中。[/yellow]")
+    else:
+        new_block = [
+            f'\n[assets."{canonical}"]',
+            f'name = "{display_name}"',
+            f'sector = "{assigned_sector}"',
+            f'role = "{normalized_role}"',
+            f'valuation_model = "{normalized_model}"',
+        ]
+        if fair_pe is not None:
+            new_block.append(f"fair_pe = {fair_pe:.1f}")
+        if fair_pb is not None:
+            new_block.append(f"fair_pb = {fair_pb:.2f}")
+        new_block.append("")
+
+        content_to_write = existing_text.rstrip() + "\n" + "\n".join(new_block)
+        if dry_run:
+            console.print("[cyan][Dry Run] 准备追加如下配置：[/cyan]")
+            console.print("\n".join(new_block))
+        else:
+            toml_path.write_text(content_to_write, encoding="utf-8")
+            console.print(
+                f"[green]已成功添加 {canonical}（{display_name}）到 {toml_path.name}[/green]"
+            )
+
+    table = Table(title=f"新标的配置：{display_name} ({canonical})")
+    table.add_column("配置项")
+    table.add_column("设定值")
+    table.add_row("代码 (Canonical)", canonical)
+    table.add_row("名称 (Name)", display_name)
+    table.add_row("行业 (Sector)", assigned_sector)
+    table.add_row("角色 (Role)", normalized_role)
+    table.add_row("估值模型 (Valuation Model)", normalized_model)
+    if fair_pe:
+        table.add_row("参考 PE", f"{fair_pe:.1f}")
+    if fair_pb:
+        table.add_row("参考 PB", f"{fair_pb:.2f}")
+    console.print(table)
+
+    if sync and not dry_run:
+        console.print("\n[cyan]正在同步历史数据...[/cyan]")
+        try:
+            res = sync_symbol(
+                database,
+                canonical,
+                start=date.today() - timedelta(days=365 * 5 + 2),
+                end=date.today(),
+            )
+            console.print(
+                f"[green]同步成功[/green]：获取 {res.bars} 根日线，"
+                f"{res.actions} 条公司行动，数据质量 **{res.quality.value}** 级"
+            )
+        except Exception as exc:
+            console.print(f"[yellow]同步出现警告或失败：{exc}[/yellow]")
+    database.close()
+
+
+@app.command("scenario")
+def scenario_command(
+    symbol: Annotated[str, typer.Argument(help="证券代码，如 CN:601318")],
+    eps_growth_delta: Annotated[
+        float,
+        typer.Option(help="盈利增速/净利润预期变动比例（如 -0.10 表示盈利下调 10%）"),
+    ] = 0.0,
+    pe_delta: Annotated[
+        float,
+        typer.Option(help="目标估值 PE 变动（如 -2.0 表示目标 PE 下调 2 倍）"),
+    ] = 0.0,
+    margin_delta: Annotated[
+        float,
+        typer.Option(help="安全边际比例变动（如 0.05 表示安全边际从 20% 提高到 25%）"),
+    ] = 0.0,
+) -> None:
+    """What-If 敏感性情景推演：分析盈利变动、估值调整与安全边际对买入底线的影响。"""
+    config, database = _context()
+    canonical = Instrument.parse(symbol).canonical
+    profile = config.asset(canonical)
+    name = str(profile.get("name", canonical))
+    records = database.latest_fundamentals(canonical, date.today())
+    bars = database.load_bars(canonical, date.today())
+    if bars.empty:
+        database.close()
+        console.print("[red]没有可用行情缓存，请先 stock sync。[/red]")
+        raise typer.Exit(1)
+    current_price = float(bars.iloc[-1]["close"])
+    currency = str(bars.iloc[-1]["currency"])
+
+    base_strategy = get_valuation_strategy(profile.get("valuation_model"))
+    base_range = base_strategy.range(
+        current_price=current_price,
+        currency=currency,
+        records=records,
+        profile=profile,
+    )
+
+    scenario_profile = dict(profile)
+    base_fair_pe = float(profile.get("fair_pe", base_strategy.default_fair_pe))
+    scenario_profile["fair_pe"] = max(1.0, base_fair_pe + pe_delta)
+
+    scenario_records = dict(records)
+    if "pe" in scenario_records and scenario_records["pe"].value:
+        old_pe = float(scenario_records["pe"].value)
+        adj_factor = max(0.01, 1.0 + eps_growth_delta)
+        scenario_records["pe"] = FundamentalRecord(
+            symbol=canonical,
+            metric="pe",
+            value=old_pe / adj_factor,
+            as_of=date.today(),
+            source="scenario",
+        )
+
+    scenario_strategy_cls = type(base_strategy)
+
+    class CustomScenarioStrategy(scenario_strategy_cls):
+        pass
+
+    custom_strat = CustomScenarioStrategy()
+    custom_strat.safety_margin = max(0.05, min(0.60, base_strategy.safety_margin + margin_delta))
+
+    scenario_range = custom_strat.range(
+        current_price=current_price,
+        currency=currency,
+        records=scenario_records,
+        profile=scenario_profile,
+    )
+
+    table = Table(title=f"What-If 情景推演：{name} ({canonical})")
+    table.add_column("维度")
+    table.add_column("基准情景 (Baseline)")
+    table.add_column("推演情景 (Scenario)")
+    table.add_column("变动影响", justify="right")
+
+    table.add_row(
+        "现价 (Current Price)",
+        f"{current_price:.2f} {currency}",
+        f"{current_price:.2f} {currency}",
+        "—",
+    )
+    table.add_row(
+        "假设参考 PE",
+        f"{base_fair_pe:.1f}x",
+        f"{scenario_profile['fair_pe']:.1f}x",
+        f"{pe_delta:+.1f}x",
+    )
+    table.add_row(
+        "盈利预期调整",
+        "基准 (0%)",
+        f"{eps_growth_delta:+.1%}",
+        f"{eps_growth_delta:+.1%}",
+    )
+    table.add_row(
+        "安全边际要求",
+        f"{base_strategy.safety_margin:.0%}",
+        f"{custom_strat.safety_margin:.0%}",
+        f"{margin_delta:+.0%}",
+    )
+
+    if base_range.available and scenario_range.available:
+        b_fair = f"{base_range.fair_low:.2f}–{base_range.fair_high:.2f}"
+        s_fair = f"{scenario_range.fair_low:.2f}–{scenario_range.fair_high:.2f}"
+        fair_delta = (
+            (scenario_range.fair_low / base_range.fair_low - 1) if base_range.fair_low else 0
+        )
+        table.add_row("合理价值区间", b_fair, s_fair, f"{fair_delta:+.1%}")
+
+        b_buy = f"{base_range.buy_low:.2f}–{base_range.buy_high:.2f}"
+        s_buy = f"{scenario_range.buy_low:.2f}–{scenario_range.buy_high:.2f}"
+        buy_delta = (
+            (scenario_range.buy_high / base_range.buy_high - 1) if base_range.buy_high else 0
+        )
+        table.add_row("分批买入观察线", b_buy, s_buy, f"{buy_delta:+.1%}")
+
+        status_base = (
+            "✓ 处于买入线下方" if current_price <= (base_range.buy_high or 0) else "○ 高于买入线"
+        )
+        status_scen = (
+            "✓ 处于买入线下方"
+            if current_price <= (scenario_range.buy_high or 0)
+            else "○ 高于买入线"
+        )
+        table.add_row("当前价格状态", status_base, status_scen, "—")
+
+    console.print(table)
+    database.close()
+
+
+@app.command("dash")
+def dash_command() -> None:
+    """终端交互式多周期决策与资产配置总览看板。"""
+    config, database = _context()
+    symbols = configured_symbols(config)
+    if not symbols:
+        console.print("[yellow]配置中没有配置任何标的。[/yellow]")
+        database.close()
+        return
+
+    table = Table(title="StockAnalysis 实时决策看板 (Multi-Horizon Dashboard)")
+    table.add_column("标的 (Symbol)", style="bold")
+    table.add_column("现价 (Price)", justify="right")
+    table.add_column("数据", justify="center")
+    table.add_column("短线 (1-20d)", justify="center")
+    table.add_column("中线 (1-6m)", justify="center")
+    table.add_column("长线 (1-3y)", justify="center")
+    table.add_column("价值 (3-10y)", justify="center")
+    table.add_column("最近预警 / 状态")
+
+    for canonical in symbols:
+        name = str(config.asset(canonical).get("name", canonical))
+        bars = database.load_bars(canonical, date.today())
+        if bars.empty:
+            table.add_row(
+                f"{name}\n[dim]{canonical}[/dim]",
+                "—",
+                "无数据",
+                "—",
+                "—",
+                "—",
+                "—",
+                "[red]未同步行情[/red]",
+            )
+            continue
+        current_price = float(bars.iloc[-1]["close"])
+        currency = str(bars.iloc[-1]["currency"])
+        quality, _ = quality_summary(bars, date.today())
+
+        frame, _ = _load_analysis_frame(database, canonical, date.today())
+        research = run_research(
+            database=database,
+            config=config,
+            symbol=canonical,
+            as_of=date.today(),
+            use_llm=False,
+        )
+        package = analyze_package(
+            config=config,
+            database=database,
+            symbol=canonical,
+            as_of=date.today(),
+            frame=frame,
+            data_quality=quality,
+            data_warnings=[],
+            forecasts=[],
+            research=research,
+        )
+
+        decisions_by_horizon = {d.horizon.value: d for d in package.decisions}
+        short_d = decisions_by_horizon.get("short")
+        med_d = decisions_by_horizon.get("medium")
+        long_d = decisions_by_horizon.get("long")
+        val_d = decisions_by_horizon.get("value")
+
+        def _cell(d: HorizonDecision | None) -> str:
+            if not d:
+                return "—"
+            if "买入" in d.action:
+                color = "green"
+            elif "持有" in d.action:
+                color = "yellow"
+            elif "减仓" in d.action or "回避" in d.action:
+                color = "red"
+            else:
+                color = "white"
+            return f"[{color}]{d.action}[/{color}]\n[dim]{d.score:+.2f} ({d.confidence:.0%})[/dim]"
+
+        vr = package.valuation_range
+        warnings_txt = "正常"
+        if quality is DataQuality.C:
+            warnings_txt = "[red]数据质量C级[/red]"
+        elif vr.available and vr.buy_high and current_price <= vr.buy_high:
+            warnings_txt = "[bold green]进入安全买入区[/bold green]"
+
+        table.add_row(
+            f"{name}\n[dim]{canonical}[/dim]",
+            f"{current_price:.2f} {currency}",
+            quality.value,
+            _cell(short_d),
+            _cell(med_d),
+            _cell(long_d),
+            _cell(val_d),
+            warnings_txt,
+        )
+
+    console.print(table)
+    database.close()
 
 
 if __name__ == "__main__":

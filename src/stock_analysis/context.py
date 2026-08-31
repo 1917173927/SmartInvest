@@ -54,6 +54,40 @@ def _fresh_enough(database: Database, table: str, key_column: str, key: str, hou
     return utc_now() - fetched < timedelta(hours=hours)
 
 
+def _cache_snapshot(
+    database: Database,
+    *,
+    table: str,
+    key_column: str,
+    key: str,
+    date_column: str,
+    end: date,
+) -> tuple[int, date | None]:
+    """Return the usable cache size and latest point-in-time date.
+
+    Table and column names are internal constants supplied by this module; the
+    values remain parameterized so a symbol/series cannot alter the query.
+    """
+    row = database.connection.execute(
+        f"SELECT COUNT(*) AS count, MAX({date_column}) AS latest "
+        f"FROM {table} WHERE {key_column} = ? AND {date_column} <= ?",
+        (key, end.isoformat()),
+    ).fetchone()
+    if not row or not row["count"] or not row["latest"]:
+        return 0, None
+    try:
+        return int(row["count"]), date.fromisoformat(str(row["latest"])[:10])
+    except ValueError:
+        return int(row["count"]), None
+
+
+def _cache_warning(count: int, latest: date | None, end: date) -> str:
+    if latest is None:
+        return f"使用本地缓存 {count} 条，但缓存日期无法解析"
+    stale_days = max(0, (end - latest).days)
+    return f"使用本地缓存 {count} 条，最新 {latest.isoformat()}，陈旧 {stale_days} 天"
+
+
 def _news_items(frame: pd.DataFrame, symbol: str, start: date, end: date) -> list[dict[str, Any]]:
     if frame is None or frame.empty:
         return []
@@ -115,6 +149,8 @@ def refresh_news(
 
         frame = ak.stock_news_em(symbol=Instrument.parse(symbol).code)
         items = _news_items(frame, symbol, start, end)
+        if not items:
+            raise RuntimeError("未返回带日期和标题的可用新闻")
         database.upsert_news(items)
         for item in items:
             database.add_document(
@@ -127,7 +163,20 @@ def refresh_news(
         result.news_count = len(items)
         result.refreshed.append("news")
     except Exception as exc:
-        result.warnings.append(f"东方财富新闻刷新失败: {type(exc).__name__}: {exc}")
+        warning = f"东方财富新闻刷新失败: {type(exc).__name__}: {exc}"
+        count, latest = _cache_snapshot(
+            database,
+            table="news_items",
+            key_column="symbol",
+            key=symbol,
+            date_column="published_at",
+            end=end,
+        )
+        if count:
+            result.skipped.append("news-cache")
+            warning += "；" + _cache_warning(count, latest, end)
+            result.news_count = count
+        result.warnings.append(warning)
     return result
 
 
@@ -217,7 +266,19 @@ def refresh_macro(
             result.macro_count += len(observations)
             result.refreshed.append(normalized)
         except Exception as exc:
-            result.warnings.append(f"{normalized} 刷新失败: {type(exc).__name__}: {exc}")
+            warning = f"{normalized} 刷新失败: {type(exc).__name__}: {exc}"
+            count, latest = _cache_snapshot(
+                database,
+                table="macro_observations",
+                key_column="series",
+                key=normalized,
+                date_column="observation_date",
+                end=end,
+            )
+            if count:
+                result.skipped.append(f"{normalized}-cache")
+                warning += "；" + _cache_warning(count, latest, end)
+            result.warnings.append(warning)
     return result
 
 

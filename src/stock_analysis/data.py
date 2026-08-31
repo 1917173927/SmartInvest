@@ -611,9 +611,11 @@ class Database:
             ["action_date", "_source_rank", "fetched_at"],
             ascending=[True, True, False],
         )
-        return frame.drop_duplicates("action_date", keep="first").drop(
-            columns="_source_rank"
-        ).reset_index(drop=True)
+        return (
+            frame.drop_duplicates("action_date", keep="first")
+            .drop(columns="_source_rank")
+            .reset_index(drop=True)
+        )
 
     def latest_fundamentals(self, symbol: str, as_of: date) -> dict[str, FundamentalRecord]:
         rows = self.connection.execute(
@@ -911,9 +913,7 @@ class Database:
             """,
             (
                 utc_now().isoformat(),
-                json.dumps(
-                    {"reason": "任务超过运行时限且未正常结束"}, ensure_ascii=False
-                ),
+                json.dumps({"reason": "任务超过运行时限且未正常结束"}, ensure_ascii=False),
                 stale_before.isoformat(),
             ),
         )
@@ -1026,9 +1026,7 @@ class Database:
         )
         self.connection.commit()
 
-    def load_news(
-        self, symbol: str, as_of: date | None = None, limit: int = 100
-    ) -> pd.DataFrame:
+    def load_news(self, symbol: str, as_of: date | None = None, limit: int = 100) -> pd.DataFrame:
         where = "symbol = ?"
         params: list[Any] = [symbol]
         if as_of:
@@ -1469,9 +1467,12 @@ def sync_symbol(
 ) -> SyncResult:
     instrument = Instrument.parse(raw_symbol)
     result = SyncResult(symbol=instrument.canonical)
-    run_id = "sync-" + hashlib.sha256(
-        f"{instrument.canonical}:{start}:{end}:{utc_now().isoformat()}".encode()
-    ).hexdigest()[:16]
+    run_id = (
+        "sync-"
+        + hashlib.sha256(
+            f"{instrument.canonical}:{start}:{end}:{utc_now().isoformat()}".encode()
+        ).hexdigest()[:16]
+    )
     selected: MarketDataProvider | None = None
     bars: list[Bar] = []
     for provider in providers or provider_order(instrument):
@@ -1479,6 +1480,13 @@ def sync_symbol(
             continue
         try:
             bars = provider.fetch_bars(instrument, start, end)
+            # An empty response is not a successful synchronization.  Public
+            # endpoints sometimes return an empty frame for a transient block
+            # or an unsupported date range; treat it like an exception so the
+            # next provider can be tried before falling back to stale cache.
+            if not bars:
+                result.warnings.append(f"{provider.name} 未返回行情；继续尝试备用数据源")
+                continue
             selected = provider
             break
         except Exception as exc:
@@ -1532,11 +1540,14 @@ def sync_symbol(
     # Company actions are an independent data product.  A successful price
     # request must not prevent a fallback action provider from being tried when
     # the selected provider's dividend endpoint is unavailable.
-    action_providers = [selected, *(
-        provider
-        for provider in (providers or provider_order(instrument))
-        if provider is not selected and provider.supports(instrument)
-    )]
+    action_providers = [
+        selected,
+        *(
+            provider
+            for provider in (providers or provider_order(instrument))
+            if provider is not selected and provider.supports(instrument)
+        ),
+    ]
     action_count, action_errors = sync_actions(
         database, instrument.canonical, start=start, end=end, providers=action_providers
     )
@@ -1625,9 +1636,7 @@ def backfill_symbol(
         chunk_start = max(
             start,
             (
-                pd.Timestamp(chunk_end)
-                - pd.DateOffset(years=chunk_years)
-                + pd.Timedelta(days=1)
+                pd.Timestamp(chunk_end) - pd.DateOffset(years=chunk_years) + pd.Timedelta(days=1)
             ).date(),
         )
         try:

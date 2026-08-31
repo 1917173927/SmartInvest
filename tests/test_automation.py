@@ -49,10 +49,7 @@ def test_unattended_run_uses_cache_without_network(tmp_path) -> None:
     assert summary.succeeded == ["CN:601318"]
     assert not summary.failed
     assert (
-        config.reports_dir
-        / "个股"
-        / "CN-601318"
-        / "2025-01-01-CN-601318-中国平安-all.md"
+        config.reports_dir / "个股" / "CN-601318" / "2025-01-01-CN-601318-中国平安-all.md"
     ).exists()
     assert (config.reports_dir / "最新摘要.md").exists()
     with Database(config.db_path) as database:
@@ -95,9 +92,7 @@ def test_summary_surfaces_action_score_and_confidence(tmp_path) -> None:
     config = AppConfig(tmp_path, {"assets": {"CN:601318": {"name": "中国平安"}}})
     summary = AutomationSummary(as_of=date(2026, 8, 31), symbols=["CN:601318"])
     summary.highlights = {"CN:601318": {"short": "持有/观察"}}
-    summary.decision_scores = {
-        "CN:601318": {"short": {"score": 0.25, "confidence": 0.75}}
-    }
+    summary.decision_scores = {"CN:601318": {"short": {"score": 0.25, "confidence": 0.75}}}
     rendered = render_summary_markdown(config, summary)
     assert "持有/观察<br>评分 +0.25 / 置信 75%" in rendered
 

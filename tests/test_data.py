@@ -235,6 +235,54 @@ def test_sync_uses_action_fallback_independent_of_price_provider(tmp_path) -> No
     assert actions.iloc[0]["source"] == "action-fallback"
 
 
+def test_sync_tries_backup_when_primary_returns_empty(tmp_path) -> None:
+    class EmptyProvider:
+        name = "empty-primary"
+
+        def supports(self, _instrument):
+            return True
+
+        def fetch_bars(self, *_args):
+            return []
+
+        def fetch_actions(self, *_args):
+            return []
+
+        def fetch_fundamentals(self, *_args):
+            return []
+
+    class BackupProvider(EmptyProvider):
+        name = "backup"
+
+        def fetch_bars(self, instrument, *_args):
+            return [
+                Bar(
+                    symbol=instrument.canonical,
+                    trade_date=date(2026, 1, 2),
+                    open=10,
+                    high=11,
+                    low=9,
+                    close=10,
+                    volume=100,
+                    currency="CNY",
+                    source=self.name,
+                )
+            ]
+
+    with Database(tmp_path / "analysis.sqlite3") as database:
+        result = sync_symbol(
+            database,
+            "CN:601318",
+            start=date(2026, 1, 1),
+            end=date(2026, 1, 3),
+            providers=[EmptyProvider(), BackupProvider()],
+        )
+        cached = database.load_bars("CN:601318")
+    assert result.provider == "backup"
+    assert len(cached) == 1
+    assert any("未返回行情" in warning for warning in result.warnings)
+
+
 def test_database_filters_future_bars_and_documents(tmp_path) -> None:
     database = Database(tmp_path / "analysis.sqlite3")
     database.upsert_bars(
@@ -355,9 +403,7 @@ def test_stale_automation_run_is_recovered(tmp_path) -> None:
         ((datetime.now(tz=UTC) - timedelta(hours=1)).isoformat(),),
     )
     database.connection.commit()
-    recovered = database.recover_stale_automation_runs(
-        datetime.now(tz=UTC) - timedelta(minutes=20)
-    )
+    recovered = database.recover_stale_automation_runs(datetime.now(tz=UTC) - timedelta(minutes=20))
     row = database.connection.execute(
         "SELECT status, finished_at FROM automation_runs WHERE id = 'old-run'"
     ).fetchone()
