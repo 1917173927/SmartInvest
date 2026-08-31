@@ -1516,12 +1516,27 @@ def sync_symbol(
     result.latest_date = max(item.trade_date for item in bars)
     result.quality = min((item.quality for item in bars), key=lambda item: item.value)
 
-    try:
-        actions = selected.fetch_actions(instrument, start, end)
-        database.upsert_actions(actions)
-        result.actions = len(actions)
-    except Exception as exc:
-        result.warnings.append(f"公司行动未同步: {exc}")
+    # Company actions are an independent data product.  A successful price
+    # request must not prevent a fallback action provider from being tried when
+    # the selected provider's dividend endpoint is unavailable.
+    action_providers = [selected]
+    action_providers.extend(
+        provider
+        for provider in (providers or provider_order(instrument))
+        if provider is not selected and provider.supports(instrument)
+    )
+    action_error: str | None = None
+    for action_provider in action_providers:
+        try:
+            actions = action_provider.fetch_actions(instrument, start, end)
+            if actions:
+                database.upsert_actions(actions)
+                result.actions += len(actions)
+                break
+        except Exception as exc:
+            action_error = f"{action_provider.name}: {type(exc).__name__}: {exc}"
+    if action_error and result.actions == 0:
+        result.warnings.append(f"公司行动未同步: {action_error}")
 
     fundamental_records: list[FundamentalRecord] = []
     try:

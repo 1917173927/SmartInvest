@@ -16,6 +16,7 @@ from stock_analysis.data import (
     Market,
     _normalize_provider_metric,
     coverage_warnings,
+    sync_symbol,
     total_return_frame,
 )
 
@@ -159,6 +160,65 @@ def test_database_uses_one_action_source_per_date(tmp_path) -> None:
         actions = database.load_actions("CN:000933")
     assert len(actions) == 1
     assert actions.iloc[0]["source"] == "akshare-corporate-actions"
+
+
+def test_sync_uses_action_fallback_independent_of_price_provider(tmp_path) -> None:
+    class PriceProvider:
+        name = "price-source"
+
+        def supports(self, _instrument):
+            return True
+
+        def fetch_bars(self, instrument, _start, _end):
+            return [
+                Bar(
+                    symbol=instrument.canonical,
+                    trade_date=date(2026, 1, 1),
+                    open=10,
+                    high=10,
+                    low=10,
+                    close=10,
+                    volume=1,
+                    currency="CNY",
+                    source=self.name,
+                )
+            ]
+
+        def fetch_actions(self, *_args):
+            raise RuntimeError("action endpoint down")
+
+        def fetch_fundamentals(self, *_args):
+            return []
+
+    class ActionFallback(PriceProvider):
+        name = "action-fallback"
+
+        def fetch_bars(self, *_args):
+            raise RuntimeError("must not replace price source")
+
+        def fetch_actions(self, instrument, *_args):
+            return [
+                CorporateAction(
+                    symbol=instrument.canonical,
+                    action_date=date(2026, 1, 1),
+                    dividend=0.1,
+                    split_ratio=1.0,
+                    source=self.name,
+                )
+            ]
+
+    with Database(tmp_path / "analysis.sqlite3") as database:
+        result = sync_symbol(
+            database,
+            "CN:601318",
+            start=date(2026, 1, 1),
+            end=date(2026, 1, 2),
+            providers=[PriceProvider(), ActionFallback()],
+        )
+        actions = database.load_actions("CN:601318")
+    assert result.provider == "price-source"
+    assert result.actions == 1
+    assert actions.iloc[0]["source"] == "action-fallback"
 
 
 def test_database_filters_future_bars_and_documents(tmp_path) -> None:

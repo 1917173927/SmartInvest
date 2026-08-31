@@ -64,6 +64,7 @@ class AutomationSummary:
     succeeded: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)
     highlights: dict[str, dict[str, str]] = field(default_factory=dict)
+    decision_scores: dict[str, dict[str, dict[str, float]]] = field(default_factory=dict)
     data_quality: dict[str, str] = field(default_factory=dict)
     macro_scores: dict[str, float] = field(default_factory=dict)
     evaluated_receipts: int = 0
@@ -241,12 +242,16 @@ def render_summary_markdown(config: AppConfig, summary: AutomationSummary) -> st
         safe = symbol.replace(":", "-").replace("/", "-")
         name = safe_filename_component(str(config.asset(symbol).get("name", symbol)))
         actions = summary.highlights.get(symbol, {})
+        metrics = summary.decision_scores.get(symbol, {})
+        short = _summary_decision(actions, metrics.get("short"), "short")
+        medium = _summary_decision(actions, metrics.get("medium"), "medium")
+        long = _summary_decision(actions, metrics.get("long"), "long")
+        value = _summary_decision(actions, metrics.get("value"), "value")
         report = f"个股/{safe}/{summary.as_of.isoformat()}-{safe}-{name}-all.md"
         lines.append(
             f"| {name}（{symbol}） | {summary.data_quality.get(symbol, '—')} | "
-            f"{summary.macro_scores.get(symbol, 0):+.2f} | {actions.get('short', '—')} | "
-            f"{actions.get('medium', '—')} | {actions.get('long', '—')} | "
-            f"{actions.get('value', '—')} | [{safe}](<{report}>) |"
+            f"{summary.macro_scores.get(symbol, 0):+.2f} | {short} | {medium} | {long} | {value} | "
+            f"[{safe}](<{report}>) |"
         )
     lines.extend(["", f"- 成功：{len(summary.succeeded)} 个；失败：{len(summary.failed)} 个"])
     if summary.failed:
@@ -276,6 +281,16 @@ def render_summary_markdown(config: AppConfig, summary: AutomationSummary) -> st
         ]
     )
     return "\n".join(lines)
+
+
+def _summary_decision(
+    actions: dict[str, str], metrics: dict[str, float] | None, horizon: str
+) -> str:
+    """Keep the root summary actionable without hiding score uncertainty."""
+    action = actions.get(horizon, "—")
+    if not metrics:
+        return action
+    return f"{action}<br>评分 {metrics['score']:+.2f} / 置信 {metrics['confidence']:.0%}"
 
 
 def run_automation(
@@ -672,6 +687,13 @@ def run_automation(
                 summary.highlights[symbol] = {
                     item.horizon.value: item.action for item in package.decisions
                 }
+                summary.decision_scores[symbol] = {
+                    item.horizon.value: {
+                        "score": float(item.score),
+                        "confidence": float(item.confidence),
+                    }
+                    for item in package.decisions
+                }
                 summary.data_quality[symbol] = package.data_quality.value
                 summary.macro_scores[symbol] = package.macro_score
             except Exception as exc:  # one bad provider/symbol must not stop the batch
@@ -707,6 +729,7 @@ def summary_json(summary: AutomationSummary) -> str:
             "succeeded": summary.succeeded,
             "failed": summary.failed,
             "highlights": summary.highlights,
+            "decision_scores": summary.decision_scores,
             "data_quality": summary.data_quality,
             "macro_scores": summary.macro_scores,
             "evaluated_receipts": summary.evaluated_receipts,
