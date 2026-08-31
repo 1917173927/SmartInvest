@@ -56,6 +56,10 @@ format = "svg"
 include_macd = true
 include_rsi = true
 include_volume = true
+include_levels = true
+level_lookback_sessions = 360
+level_max_per_side = 2
+include_probability_fan = true
 
 # 复制本段增加自己的标的。真实配置被 .gitignore 排除。
 [assets."CN:601318"]

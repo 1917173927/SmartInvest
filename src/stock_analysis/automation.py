@@ -13,7 +13,7 @@ from uuid import uuid4
 
 import pandas as pd
 
-from stock_analysis.charts import render_stock_chart
+from stock_analysis.charts import render_probability_chart, render_stock_chart
 from stock_analysis.context import refresh_context
 from stock_analysis.data import (
     AppConfig,
@@ -579,7 +579,7 @@ def run_automation(
                 chart_config = config.section("charts")
                 if bool(chart_config.get("enabled", True)):
                     chart_format = str(chart_config.get("format", "svg")).lower()
-                    chart_name = (
+                    technical_name = (
                         f"{analysis_date.isoformat()}-{safe_symbol}-"
                         f"{safe_filename_component(package.name)}-技术图.{chart_format}"
                     )
@@ -587,25 +587,56 @@ def run_automation(
                         render_stock_chart(
                             frame,
                             package,
-                            config.reports_dir / "个股" / safe_symbol / "charts" / chart_name,
+                            config.reports_dir / "个股" / safe_symbol / "charts" / technical_name,
                         )
-                        package.chart_paths = [f"charts/{chart_name}"]
+                        package.chart_paths.append(f"charts/{technical_name}")
                         _task(
                             summary,
-                            name="chart-render",
+                            name="chart-render-technical",
                             status="executed",
-                            reason=chart_name,
+                            reason=technical_name,
                             symbol=symbol,
                         )
                     except Exception as exc:
                         package.data_warnings.append(f"图表未生成: {exc}")
                         _task(
                             summary,
-                            name="chart-render",
+                            name="chart-render-technical",
                             status="failed",
                             reason=str(exc),
                             symbol=symbol,
                         )
+                    if bool(chart_config.get("include_probability_fan", True)) and forecasts:
+                        probability_name = (
+                            f"{analysis_date.isoformat()}-{safe_symbol}-"
+                            f"{safe_filename_component(package.name)}-概率路径图.{chart_format}"
+                        )
+                        try:
+                            render_probability_chart(
+                                package,
+                                config.reports_dir
+                                / "个股"
+                                / safe_symbol
+                                / "charts"
+                                / probability_name,
+                            )
+                            package.chart_paths.append(f"charts/{probability_name}")
+                            _task(
+                                summary,
+                                name="chart-render-probability",
+                                status="executed",
+                                reason=probability_name,
+                                symbol=symbol,
+                            )
+                        except Exception as exc:
+                            package.data_warnings.append(f"概率图未生成: {exc}")
+                            _task(
+                                summary,
+                                name="chart-render-probability",
+                                status="failed",
+                                reason=str(exc),
+                                symbol=symbol,
+                            )
                 create_receipts(database, package)
                 _write_report(
                     config,

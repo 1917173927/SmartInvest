@@ -9,10 +9,13 @@ import pandas as pd
 from stock_analysis.data import AppConfig, Database, DataQuality
 from stock_analysis.forecast import (
     Chronos2Forecaster,
+    ForecastBundle,
     ForecastEstimate,
+    ModelStatus,
     RandomWalkForecaster,
     evaluate_open_receipts,
     forecast_one,
+    probability_fan,
     walk_forward_backtest,
 )
 
@@ -96,6 +99,39 @@ def test_initial_ensemble_uses_equal_model_weights(tmp_path) -> None:
     assert bundle.weights == {"random-walk": 0.5, "chronos-2": 0.5}
     assert "chronos-2" in bundle.components
     database.close()
+
+
+def test_probability_fan_preserves_forecast_anchors() -> None:
+    estimates = []
+    for days, q10, q50, q90 in ((5, -0.05, 0.01, 0.08), (20, -0.12, 0.04, 0.20)):
+        estimate = ForecastEstimate(
+            model="fixture",
+            horizon_days=days,
+            q10=q10,
+            q50=q50,
+            q90=q90,
+            up_probability=0.6,
+            annualized_volatility=0.2,
+            potential_drawdown=-q10,
+        )
+        estimates.append(
+            ForecastBundle(
+                symbol="CN:601318",
+                as_of=date(2026, 1, 1),
+                due_date=date(2026, 2, 1),
+                horizon_days=days,
+                ensemble=estimate,
+                components={"fixture": estimate},
+                weights={"fixture": 1.0},
+                status=ModelStatus.EXPERIMENTAL,
+                data_quality=DataQuality.B,
+            )
+        )
+    fan = probability_fan(estimates)
+    for days, q10, q50, q90 in ((5, -0.05, 0.01, 0.08), (20, -0.12, 0.04, 0.20)):
+        row = fan.loc[fan["day"] == days].iloc[0]
+        np.testing.assert_allclose([row["q10"], row["q50"], row["q90"]], [q10, q50, q90])
+    assert (fan[["q10", "q25", "q50", "q75", "q90"]].diff(axis=1).iloc[:, 1:] >= 0).all().all()
 
 
 def test_evaluate_open_receipt_records_actual_result(tmp_path) -> None:

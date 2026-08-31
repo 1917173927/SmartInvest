@@ -16,7 +16,13 @@ from pydantic import BaseModel, Field
 
 from stock_analysis.data import AppConfig, Database, DataQuality, FundamentalRecord, utc_now
 from stock_analysis.forecast import ForecastBundle, ModelStatus
-from stock_analysis.indicators import add_indicators, macro_assessments, macro_exposures
+from stock_analysis.indicators import (
+    PriceZone,
+    add_indicators,
+    detect_price_zones,
+    macro_assessments,
+    macro_exposures,
+)
 from stock_analysis.research import ResearchResult
 
 
@@ -84,6 +90,7 @@ class AnalysisPackage(BaseModel):
     macro: list[MetricAssessment] = Field(default_factory=list)
     macro_score: float = 0.0
     chart_paths: list[str] = Field(default_factory=list)
+    price_zones: list[PriceZone] = Field(default_factory=list)
 
 
 class PortfolioPosition(BaseModel):
@@ -652,6 +659,17 @@ def analyze_package(
         override_low=fair_value_low,
         override_high=fair_value_high,
     )
+    chart_config = config.section("charts")
+    price_zones = (
+        detect_price_zones(
+            frame,
+            as_of=as_of,
+            lookback_sessions=int(chart_config.get("level_lookback_sessions", 360)),
+            max_per_side=int(chart_config.get("level_max_per_side", 2)),
+        )
+        if bool(chart_config.get("include_levels", True))
+        else []
+    )
     decisions = build_decisions(
         config=config,
         forecasts=forecasts,
@@ -666,6 +684,19 @@ def analyze_package(
         role=str(profile.get("role", "satellite")),
         macro_score=macro_score,
     )
+    nearest_support = next((zone for zone in price_zones if zone.kind == "support"), None)
+    nearest_resistance = next((zone for zone in price_zones if zone.kind == "resistance"), None)
+    for decision in decisions:
+        if decision.horizon not in {Horizon.SHORT, Horizon.MEDIUM}:
+            continue
+        if nearest_support:
+            decision.invalidation_conditions.append(
+                f"连续两日收盘低于 {nearest_support.low:.2f}，当前支撑带视为失效"
+            )
+        if nearest_resistance:
+            decision.invalidation_conditions.append(
+                f"突破 {nearest_resistance.high:.2f} 后若无法站稳，仍按压力带处理"
+            )
     return AnalysisPackage(
         symbol=symbol,
         name=str(profile.get("name", symbol)),
@@ -683,6 +714,7 @@ def analyze_package(
         decisions=decisions,
         macro=macro,
         macro_score=macro_score,
+        price_zones=price_zones,
     )
 
 
@@ -775,7 +807,33 @@ def render_analysis_markdown(package: AnalysisPackage) -> str:
     if package.chart_paths:
         lines.extend(["", "## 技术图表", ""])
         for chart_path in package.chart_paths:
-            lines.append(f"![{package.name} K线与技术指标](<{chart_path}>)")
+            chart_label = "概率路径" if "概率" in chart_path else "K线与技术指标"
+            lines.append(f"![{package.name} {chart_label}](<{chart_path}>)")
+    lines.extend(["", "## 支撑与压力", ""])
+    if package.price_zones:
+        lines.extend(
+            [
+                "| 类型 | 区间 | 中心 | 距现价 | 强度分 | 触达 | 最近触达 |",
+                "|---|---:|---:|---:|---:|---:|---|",
+            ]
+        )
+        for zone in package.price_zones:
+            label = "支撑" if zone.kind == "support" else "压力"
+            lines.append(
+                f"| {label} | {zone.low:.2f}–{zone.high:.2f} | {zone.center:.2f} | "
+                f"{zone.distance:+.1%} | {zone.strength * 100:.0f}/100 | {zone.touches} | "
+                f"{zone.last_touch.isoformat()} |"
+            )
+        lines.extend(
+            [
+                "",
+                "> 支撑/压力来自近端局部高低点聚类，并以 ATR、成交量、触达次数和"
+                "时间衰减确定区间与强度；强度分不是守住概率，它们仍可能被跳空、重大事件"
+                "或趋势加速直接击穿。",
+            ]
+        )
+    else:
+        lines.append("- 历史枢轴不足，暂不生成支撑/压力区间。")
     lines.extend(
         [
             "",

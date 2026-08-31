@@ -26,6 +26,8 @@ from stock_analysis.data import (
 SHORT_HORIZONS = (5, 10, 20)
 MEDIUM_HORIZONS = (60, 120)
 QUANTILE_LEVELS = (0.1, 0.5, 0.9)
+Z_90 = 1.2815515655446004
+Z_75 = 0.6744897501960817
 
 
 class ModelStatus(StrEnum):
@@ -67,6 +69,45 @@ class ForecastBundle(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     calibration_samples: int = 0
     calibration_target: int = 100
+
+
+def probability_fan(forecasts: list[ForecastBundle]) -> pd.DataFrame:
+    """Interpolate nested probability bands across forecast horizon anchors.
+
+    Only the configured forecast horizons are model outputs. Intermediate days
+    are explicitly a visualization interpolation in log-return space.
+    """
+    by_horizon = {item.horizon_days: item for item in forecasts}
+    if not by_horizon:
+        return pd.DataFrame(columns=["day", "q10", "q25", "q50", "q75", "q90"])
+    anchors: list[dict[str, float]] = [
+        {"day": 0.0, "q10": 0.0, "q25": 0.0, "q50": 0.0, "q75": 0.0, "q90": 0.0}
+    ]
+    for horizon, bundle in sorted(by_horizon.items()):
+        estimate = bundle.ensemble
+        q10_log = math.log1p(max(estimate.q10, -0.999999))
+        q50_log = math.log1p(max(estimate.q50, -0.999999))
+        q90_log = math.log1p(max(estimate.q90, -0.999999))
+        sigma = max((q90_log - q10_log) / (2 * Z_90), 1e-8)
+        q25 = math.expm1(q50_log - Z_75 * sigma)
+        q75 = math.expm1(q50_log + Z_75 * sigma)
+        ordered = sorted((estimate.q10, q25, estimate.q50, q75, estimate.q90))
+        anchors.append(
+            {
+                "day": float(horizon),
+                "q10": ordered[0],
+                "q25": ordered[1],
+                "q50": ordered[2],
+                "q75": ordered[3],
+                "q90": ordered[4],
+            }
+        )
+    anchor_frame = pd.DataFrame(anchors)
+    days = np.arange(0, int(anchor_frame["day"].max()) + 1, dtype=float)
+    result = {"day": days.astype(int)}
+    for field in ("q10", "q25", "q50", "q75", "q90"):
+        result[field] = np.interp(days, anchor_frame["day"], anchor_frame[field])
+    return pd.DataFrame(result)
 
 
 class Forecaster(Protocol):

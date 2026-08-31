@@ -31,8 +31,8 @@ decision：质量、估值、多因素评分、安全边际、硬约束、多周
 - `decision.py`：确定性规则、风险门槛、组合解析和报告模型。
 - `cli.py` 与 `automation.py`：编排、无交互批处理与用户接口，不承载投资算法；`automation.py` 仅是 CLI 的可复用运行器。
 - `context.py`：公开新闻、商品与宏观序列的 TTL 刷新，不执行投资判断。
-- `indicators.py`：纯函数式技术指标与时间点对齐，禁止网络访问。
-- `charts.py`：可选 Matplotlib 静态输出，不改变分析结果。
+- `indicators.py`：纯函数式技术指标、宏观暴露与 ATR 枢轴区间，禁止网络访问。
+- `charts.py`：可选 Matplotlib 静态输出；技术图和概率扇形图分离，不改变模型结果。
 
 `__init__.py` 与 `__main__.py` 只负责包入口。
 
@@ -46,6 +46,7 @@ decision：质量、估值、多因素评分、安全边际、硬约束、多周
 6. 模型失败必须可降级，基础 CLI 不依赖 PyTorch、Chronos 或 API。
 7. SQLite 是事实与审计源；Markdown/SVG 是可重建的阅读层，不反向覆盖数据库。
 8. 每次自动运行及其 `executed/skipped/failed` 任务都必须有唯一运行编号。
+9. 支撑/压力强度不得表述为概率；插值概率路径不得伪装成逐日模型输出。
 
 ## 扩展方式
 
