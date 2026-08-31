@@ -10,20 +10,40 @@ from pathlib import Path
 
 def main() -> int:
     project = Path(__file__).resolve().parents[1]
-    template = project / "scripts" / "com.stockanalysis.daily.plist.template"
-    destination = Path.home() / "Library" / "LaunchAgents" / "com.stockanalysis.daily.plist"
     python = project / ".venv" / "bin" / "python"
     if not python.exists():
         raise SystemExit(
             "缺少 .venv；请先运行 uv sync --extra data --extra forecast --extra charts"
         )
-    content = template.read_text(encoding="utf-8")
-    content = content.replace("__PROJECT_DIR__", str(project)).replace("__PYTHON__", str(python))
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(content, encoding="utf-8")
-    subprocess.run(["launchctl", "unload", str(destination)], check=False)
-    subprocess.run(["launchctl", "load", str(destination)], check=True)
-    print(f"已安装每日 18:30 自动任务: {destination}")
+
+    launch_agents = Path.home() / "Library" / "LaunchAgents"
+    launch_agents.mkdir(parents=True, exist_ok=True)
+
+    tasks = [
+        (
+            "com.stockanalysis.daily",
+            "com.stockanalysis.daily.plist.template",
+            "每日 18:30 盘后自动全流程",
+        ),
+        (
+            "com.stockanalysis.morning",
+            "com.stockanalysis.morning.plist.template",
+            "工作日 09:00 盘前挂单晨报",
+        ),
+    ]
+
+    for label, template_name, desc in tasks:
+        template = project / "scripts" / template_name
+        destination = launch_agents / f"{label}.plist"
+        content = template.read_text(encoding="utf-8")
+        content = content.replace("__PROJECT_DIR__", str(project)).replace(
+            "__PYTHON__", str(python)
+        )
+        destination.write_text(content, encoding="utf-8")
+        subprocess.run(["launchctl", "unload", str(destination)], check=False)
+        subprocess.run(["launchctl", "load", str(destination)], check=True)
+        print(f"已安装 {desc} 定时任务: {destination}")
+
     return 0
 
 

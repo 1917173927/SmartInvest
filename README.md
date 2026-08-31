@@ -81,6 +81,7 @@ LLM 只能生成白名单事件，且事件生效日不得早于证据发布日�
 ## 命令
 
 - `stock doctor`：检查配置、数据库、可选依赖与 API。
+- `stock morning`：🌅 09:15 盘前券商 App 挂单与条件单预埋晨报（支持桌面通知与精准手数挂单表）。
 - `stock dash`：终端实时多周期决策与资产配置总览看板。
 - `stock size SYMBOL`：🎯 实盘仓位测算与阶梯挂单生成器（支持 `--capital` 资金量与 `--risk-budget` 风险预算测算精确手数与止损线）。
 - `stock compare SYMBOL1 SYMBOL2...`：⚖️ 跨标的多维横向比对矩阵（按估值折扣、多周期信号与建仓优先级排序）。
@@ -99,15 +100,17 @@ LLM 只能生成白名单事件，且事件生效日不得早于证据发布日�
 
 报告写入 `06-自动分析`，个股文件名为“日期-市场代码-股票名称-周期”，图表位于对应个股的 `charts/`。技术图包含 ATR 聚类支撑/压力带、K 线、MA、成交量、MACD 和 RSI；概率图单独展示 5/10/20/60/120 日中位路径、名义 80% 与近似 50% 分位区间，并在右轴叠加上涨概率曲线。支撑/压力和合理价值区间会映射到收益轴，便于观察预测带是否接近关键价位，但不会被当成目标价。支撑/压力表另附 20 日 walk-forward 触达与守住统计，少于 20 次触达时标记为样本不足。行情、新闻、宏观、回执、校准与自动任务状态统一保存在 `.stock-analysis/analysis.sqlite3`。运行数据默认不提交 Git。
 
-### macOS 定时运行
+### macOS 定时与自动化运行
 
-`scripts/com.stockanalysis.daily.plist.template` 是每天 18:30（本地时间）运行的 launchd 模板。安装脚本会自动代入当前项目与 Python 路径：
+通过 `scripts/install_launchd.py` 一键安装两大自动化守护进程：
+1. **工作日 09:00 盘前挂单晨报 (`com.stockanalysis.morning`)**：自动计算全标的 3 阶挂单价格、建议手数与止损线，并在 macOS 桌面弹窗提醒，供 9:15 集合竞价前在券商 App 预埋限价单与条件单。
+2. **每日 18:30 盘后全流程自动化 (`com.stockanalysis.daily`)**：执行数据增量同步、新闻/宏观刷新、多周期模型计算与图表报告全量渲染。
 
 ```bash
 uv run python scripts/install_launchd.py
 ```
 
-日志和失败详情写入 `.stock-analysis/auto.log`、`.stock-analysis/launchd.*.log`；任务只生成研究报告，不会自动下单。
+日志和失败详情写入 `.stock-analysis/auto.log`、`.stock-analysis/morning.log`；任务只生成研究报告，不会自动下单。
 如需在网络或模型不可用时强制轻量运行，可在 launchd 环境中设置
 `STOCK_AUTO_USE_CHRONOS=0`、`STOCK_AUTO_USE_LLM=0`；默认值读取 `[automation]` 配置。
 

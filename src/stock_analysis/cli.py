@@ -57,6 +57,7 @@ from stock_analysis.forecast import (
     forecast_one,
     walk_forward_backtest,
 )
+from stock_analysis.morning import generate_morning_brief
 from stock_analysis.research import active_event_rows, run_research
 
 app = typer.Typer(
@@ -1280,6 +1281,52 @@ def compare_command(
 
     console.print(table)
     database.close()
+
+
+@app.command("morning")
+def morning_command(
+    capital: Annotated[float, typer.Option(help="账户总可用资金（元）")] = 100000.0,
+    notify: Annotated[bool, typer.Option(help="是否发送 macOS 桌面弹窗通知")] = True,
+) -> None:
+    """生成 09:15 集合竞价前券商 App 预埋单/条件单晨报并输出挂单网格。"""
+    config, _ = _context()
+    brief = generate_morning_brief(config, total_capital=capital, send_notification=notify)
+    console.print("\n[bold green]🌅 盘前挂单与执行晨报已生成！[/bold green]")
+    console.print(f"报告路径: [bold cyan]{brief.report_path}[/bold cyan]")
+    console.print(f"基准资金: [bold]{capital:,.2f} CNY[/bold]\n")
+
+    table = Table(title=f"09:15 盘前券商挂单执行表 ({brief.as_of.isoformat()})")
+    table.add_column("标的 / 优先级", style="bold")
+    table.add_column("现价", justify="right")
+    table.add_column("挂单批次")
+    table.add_column("挂单价", justify="right")
+    table.add_column("建议手数", justify="right")
+    table.add_column("建议股数", justify="right")
+    table.add_column("预估金额", justify="right")
+    table.add_column("券商下单类型", style="cyan")
+
+    for it in brief.items:
+        for tier in it.plan.tiers:
+            lots = tier.shares // 100
+            order_type = (
+                "集合竞价限价单"
+                if "首笔" in tier.tier_name
+                else "回调触达条件单"
+                if "强支撑" in tier.tier_name
+                else "低位限价埋单"
+            )
+            table.add_row(
+                f"{it.priority}\n{it.name} ({it.canonical})",
+                f"{it.current_price:.2f} {it.currency}",
+                tier.tier_name,
+                f"{tier.target_price:.2f} {it.currency}",
+                f"{lots} 手" if lots > 0 else "不足1手",
+                f"{tier.shares} 股",
+                f"{tier.allocated_amount:,.2f}",
+                order_type,
+            )
+
+    console.print(table)
 
 
 if __name__ == "__main__":
