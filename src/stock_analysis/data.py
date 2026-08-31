@@ -1719,6 +1719,11 @@ def quality_summary(frame: pd.DataFrame, as_of: date) -> tuple[DataQuality, list
     if (as_of - latest).days > 10:
         warnings.append("行情数据已超过 10 天未更新")
         return DataQuality.C, warnings
+    if "daily_return" in frame:
+        unexplained = pd.to_numeric(frame["daily_return"], errors="coerce").abs() > 0.35
+        if bool(unexplained.any()):
+            warnings.append("存在未解释的超过 35% 单日变动，暂停模型动作")
+            return DataQuality.C, warnings
     qualities = set(frame["quality"].astype(str)) if "quality" in frame else {"C"}
     if "C" in qualities:
         return DataQuality.C, warnings

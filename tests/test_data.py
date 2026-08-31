@@ -16,6 +16,7 @@ from stock_analysis.data import (
     Market,
     _normalize_provider_metric,
     coverage_warnings,
+    quality_summary,
     sync_symbol,
     total_return_frame,
 )
@@ -135,6 +136,19 @@ def test_raw_prices_and_actions_produce_point_in_time_returns() -> None:
     assert result.iloc[-1]["total_return_index"] == 1
     assert result.iloc[1]["return_anomaly_status"] == "corporate-action-adjusted"
     assert warnings == []
+
+
+def test_unexplained_large_return_downgrades_data_quality() -> None:
+    frame = pd.DataFrame(
+        [
+            {"trade_date": "2026-01-01", "close": 100, "quality": "B"},
+            {"trade_date": "2026-01-02", "close": 50, "quality": "B"},
+        ]
+    )
+    returns, _ = total_return_frame(frame)
+    quality, warnings = quality_summary(returns, date(2026, 1, 2))
+    assert quality.value == "C"
+    assert any("暂停模型动作" in warning for warning in warnings)
 
 
 def test_database_uses_one_action_source_per_date(tmp_path) -> None:
