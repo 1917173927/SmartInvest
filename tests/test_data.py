@@ -313,6 +313,17 @@ def test_database_stores_actions_without_rewriting_bars(tmp_path) -> None:
     database.close()
 
 
+def test_automation_run_start_is_exclusive(tmp_path) -> None:
+    with Database(tmp_path / "analysis.sqlite3") as database:
+        database.start_automation_run("run-1", date(2026, 1, 2), ["CN:601318"])
+        try:
+            database.start_automation_run("run-2", date(2026, 1, 2), ["CN:601318"])
+        except RuntimeError as exc:
+            assert "run-1" in str(exc)
+        else:
+            raise AssertionError("并行自动任务应被拒绝")
+
+
 def test_coverage_does_not_resync_for_old_suspension_gap() -> None:
     recent = pd.bdate_range("2025-09-01", "2026-08-31")
     frame = pd.DataFrame(

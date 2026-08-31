@@ -873,20 +873,33 @@ class Database:
         ).fetchone()
 
     def start_automation_run(self, run_id: str, as_of: date, symbols: Sequence[str]) -> None:
-        self.connection.execute(
-            """
-            INSERT INTO automation_runs
-            (id, as_of, symbols_json, status, started_at, finished_at, summary_json)
-            VALUES (?, ?, ?, 'running', ?, NULL, NULL)
-            """,
-            (
-                run_id,
-                as_of.isoformat(),
-                json.dumps(list(symbols), ensure_ascii=False),
-                utc_now().isoformat(),
-            ),
-        )
-        self.connection.commit()
+        # BEGIN IMMEDIATE serializes the active-run check with the insert, so
+        # two launchd/manual invocations cannot both pass the check.
+        self.connection.execute("BEGIN IMMEDIATE")
+        existing = self.connection.execute(
+            "SELECT id FROM automation_runs WHERE status = 'running' LIMIT 1"
+        ).fetchone()
+        if existing:
+            self.connection.rollback()
+            raise RuntimeError(f"已有自动任务正在运行: {existing['id']}")
+        try:
+            self.connection.execute(
+                """
+                INSERT INTO automation_runs
+                (id, as_of, symbols_json, status, started_at, finished_at, summary_json)
+                VALUES (?, ?, ?, 'running', ?, NULL, NULL)
+                """,
+                (
+                    run_id,
+                    as_of.isoformat(),
+                    json.dumps(list(symbols), ensure_ascii=False),
+                    utc_now().isoformat(),
+                ),
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def recover_stale_automation_runs(self, stale_before: datetime) -> int:
         result = self.connection.execute(
