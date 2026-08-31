@@ -25,6 +25,7 @@ from stock_analysis.data import (
     safe_filename_component,
     sync_symbol,
     total_return_frame,
+    utc_now,
 )
 from stock_analysis.decision import (
     analyze_package,
@@ -315,7 +316,17 @@ def run_automation(
     )
 
     with Database(config.db_path) as database:
+        recovered = database.recover_stale_automation_runs(
+            utc_now() - timedelta(minutes=max_runtime_minutes)
+        )
         database.start_automation_run(summary.run_id, analysis_date, selected)
+        if recovered:
+            _task(
+                summary,
+                name="stale-run-recovery",
+                status="executed",
+                reason=f"将 {recovered} 个超时未结束任务标记为 interrupted",
+            )
         organize_reports(config)
         dependencies = {
             "akshare": find_spec("akshare") is not None,

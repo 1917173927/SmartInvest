@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
 
@@ -202,3 +202,23 @@ def test_coverage_does_not_resync_for_old_suspension_gap() -> None:
     )
     warnings = coverage_warnings(frame, as_of=date(2026, 8, 31))
     assert not any("日期缺口" in warning for warning in warnings)
+
+
+def test_stale_automation_run_is_recovered(tmp_path) -> None:
+    database = Database(tmp_path / "analysis.sqlite3")
+    database.start_automation_run("old-run", date(2026, 1, 1), ["CN:601318"])
+    database.connection.execute(
+        "UPDATE automation_runs SET started_at = ? WHERE id = 'old-run'",
+        ((datetime.now(tz=UTC) - timedelta(hours=1)).isoformat(),),
+    )
+    database.connection.commit()
+    recovered = database.recover_stale_automation_runs(
+        datetime.now(tz=UTC) - timedelta(minutes=20)
+    )
+    row = database.connection.execute(
+        "SELECT status, finished_at FROM automation_runs WHERE id = 'old-run'"
+    ).fetchone()
+    assert recovered == 1
+    assert row["status"] == "interrupted"
+    assert row["finished_at"]
+    database.close()

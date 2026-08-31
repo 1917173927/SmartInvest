@@ -871,6 +871,25 @@ class Database:
         )
         self.connection.commit()
 
+    def recover_stale_automation_runs(self, stale_before: datetime) -> int:
+        result = self.connection.execute(
+            """
+            UPDATE automation_runs
+            SET status = 'interrupted', finished_at = ?,
+                summary_json = COALESCE(summary_json, ?)
+            WHERE status = 'running' AND started_at < ?
+            """,
+            (
+                utc_now().isoformat(),
+                json.dumps(
+                    {"reason": "任务超过运行时限且未正常结束"}, ensure_ascii=False
+                ),
+                stale_before.isoformat(),
+            ),
+        )
+        self.connection.commit()
+        return int(result.rowcount)
+
     def finish_automation_run(
         self,
         run_id: str,
