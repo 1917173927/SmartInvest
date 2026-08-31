@@ -681,9 +681,11 @@ def calibrate_command(
             sync_symbol(database, canonical, start=start_date, end=end_date)
             bars = database.load_bars(canonical, end_date)
             actions = database.load_actions(canonical, end_date)
-            frame, _ = total_return_frame(bars, actions)
+            frame, return_warnings = total_return_frame(bars, actions)
             if frame.empty:
                 raise RuntimeError("没有可用行情缓存")
+            if return_warnings:
+                raise RuntimeError("；".join(return_warnings) + "；请先补齐公司行动")
             for days in horizons:
                 summary = walk_forward_backtest(
                     symbol=canonical,
