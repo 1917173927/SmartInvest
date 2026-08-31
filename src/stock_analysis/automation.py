@@ -549,7 +549,15 @@ def run_automation(
             calibration_job_limit = max(1, int(automation.get("calibration_jobs_per_run", 1)))
             calibration_jobs_run = 0
             summary.calibration_progress = {}
-            for symbol in sync_ready:
+            # Rotate the starting symbol by analysis day. With a one-job daily
+            # budget this prevents the first configured asset from monopolizing
+            # all calibration slots for several days.
+            if sync_ready:
+                offset = analysis_date.toordinal() % len(sync_ready)
+                calibration_symbols = sync_ready[offset:] + sync_ready[:offset]
+            else:
+                calibration_symbols = []
+            for symbol in calibration_symbols:
                 bars = database.load_bars(symbol, analysis_date)
                 actions = database.load_actions(symbol, analysis_date)
                 frame, return_warnings = total_return_frame(bars, actions)
