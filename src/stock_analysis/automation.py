@@ -70,6 +70,7 @@ class AutomationSummary:
     macro_scores: dict[str, float] = field(default_factory=dict)
     evaluated_receipts: int = 0
     calibrated: dict[str, list[int]] = field(default_factory=dict)
+    calibration_progress: dict[str, dict[str, dict[str, object]]] = field(default_factory=dict)
     tasks: list[dict[str, str]] = field(default_factory=list)
     portfolio_report: Path | None = None
 
@@ -299,6 +300,22 @@ def render_summary_markdown(config: AppConfig, summary: AutomationSummary) -> st
     else:
         insert_at = lines.index("### 需要关注的失败任务") + 1
         lines.insert(insert_at, "- 无失败任务。")
+    if summary.calibration_progress:
+        marker = "## 运行状态"
+        progress_lines = [
+            "## 校准进度",
+            "",
+            "| 标的 | 期限 | 样本 | 状态 |",
+            "|---|---:|---:|---|",
+            *[
+                f"| {symbol} | {days}日 | {info.get('samples', 0)}/{info.get('target', 0)} | "
+                f"{info.get('status', 'unknown')} |"
+                for symbol, horizons in summary.calibration_progress.items()
+                for days, info in horizons.items()
+            ],
+            "",
+        ]
+        lines[lines.index(marker):lines.index(marker)] = progress_lines
     return "\n".join(lines)
 
 
@@ -510,6 +527,7 @@ def run_automation(
             cooldown_days = int(automation.get("calibration_cooldown_days", 7))
             calibration_job_limit = max(1, int(automation.get("calibration_jobs_per_run", 1)))
             calibration_jobs_run = 0
+            summary.calibration_progress = {}
             for symbol in sync_ready:
                 bars = database.load_bars(symbol, analysis_date)
                 actions = database.load_actions(symbol, analysis_date)
@@ -518,6 +536,12 @@ def run_automation(
                     continue
                 for raw_days in configured_horizons:
                     days = int(raw_days)
+                    state = calibration_weights(database, symbol, days, config)
+                    summary.calibration_progress.setdefault(symbol, {})[str(days)] = {
+                        "samples": state.samples,
+                        "target": target,
+                        "status": state.status.value,
+                    }
                     if any("超过 35%" in warning for warning in return_warnings):
                         _task(
                             summary,
@@ -527,7 +551,6 @@ def run_automation(
                             symbol=symbol,
                         )
                         continue
-                    state = calibration_weights(database, symbol, days, config)
                     if state.samples >= target:
                         _task(
                             summary,
@@ -597,6 +620,12 @@ def run_automation(
                             step=step,
                             chronos_forecaster=chronos_forecaster,
                         )
+                        updated = calibration_weights(database, symbol, days, config)
+                        summary.calibration_progress[symbol][str(days)] = {
+                            "samples": updated.samples,
+                            "target": target,
+                            "status": updated.status.value,
+                        }
                         summary.calibrated.setdefault(symbol, []).append(days)
                         _task(
                             summary,
@@ -830,6 +859,7 @@ def summary_json(summary: AutomationSummary) -> str:
             "macro_scores": summary.macro_scores,
             "evaluated_receipts": summary.evaluated_receipts,
             "calibrated": summary.calibrated,
+            "calibration_progress": summary.calibration_progress,
             "tasks": summary.tasks,
             "portfolio_report": str(summary.portfolio_report) if summary.portfolio_report else None,
         },
