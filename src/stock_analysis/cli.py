@@ -27,6 +27,7 @@ from stock_analysis.data import (
     Instrument,
     YFinanceProvider,
     backfill_symbol,
+    coverage_warnings,
     quality_summary,
     safe_filename_component,
     sync_symbol,
@@ -184,6 +185,27 @@ def doctor() -> None:
             ("自动运行审计", "OK" if run_count else "WARN", f"{run_count} 次运行"),
         ]
     )
+    # Per-symbol health makes provider outages and stale caches visible without
+    # opening a generated report.  This is intentionally read-only.
+    for symbol in configured_symbols(config):
+        bars = database.load_bars(symbol, date.today())
+        if bars.empty:
+            checks.append((symbol, "WARN", "没有行情缓存"))
+            continue
+        actions = database.load_actions(symbol, date.today())
+        _, return_warnings = total_return_frame(bars, actions)
+        coverage = coverage_warnings(bars, as_of=date.today())
+        latest = pd.Timestamp(bars.iloc[-1]["trade_date"]).date()
+        quality, quality_warnings = quality_summary(bars, date.today())
+        warnings = list(dict.fromkeys(return_warnings + coverage + quality_warnings))
+        checks.append(
+            (
+                symbol,
+                "WARN" if warnings or quality.value == "C" else "OK",
+                f"{len(bars)} 条行情；最新 {latest}；{len(actions)} 条公司行动"
+                + ("；" + "；".join(warnings[:2]) if warnings else ""),
+            )
+        )
     for name, status, detail in checks:
         table.add_row(name, status, detail)
     console.print(table)

@@ -5,7 +5,13 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
-from stock_analysis.automation import configured_evidence_paths, organize_reports, run_automation
+from stock_analysis.automation import (
+    AutomationSummary,
+    configured_evidence_paths,
+    organize_reports,
+    render_summary_markdown,
+    run_automation,
+)
 from stock_analysis.data import AppConfig, Bar, Database, DataQuality
 
 
@@ -82,3 +88,14 @@ def test_configured_evidence_paths_are_scoped_to_symbol(tmp_path) -> None:
     (other / "other.md").write_text("other", encoding="utf-8")
     paths = configured_evidence_paths(config, "CN:601318")
     assert [path.name for path in paths] == ["2026-01-01-report.md"]
+
+
+def test_summary_surfaces_action_score_and_confidence(tmp_path) -> None:
+    config = AppConfig(tmp_path, {"assets": {"CN:601318": {"name": "中国平安"}}})
+    summary = AutomationSummary(as_of=date(2026, 8, 31), symbols=["CN:601318"])
+    summary.highlights = {"CN:601318": {"short": "持有/观察"}}
+    summary.decision_scores = {
+        "CN:601318": {"short": {"score": 0.25, "confidence": 0.75}}
+    }
+    rendered = render_summary_markdown(config, summary)
+    assert "持有/观察<br>评分 +0.25 / 置信 75%" in rendered
