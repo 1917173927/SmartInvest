@@ -227,3 +227,4 @@ def test_static_chart_is_generated(tmp_path) -> None:
     probability = render_probability_chart(package, tmp_path / "probability.svg")
     assert probability.exists()
     assert "80%" in probability.read_text(encoding="utf-8")
+    assert "上涨概率" in probability.read_text(encoding="utf-8")
