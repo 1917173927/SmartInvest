@@ -650,7 +650,9 @@ def analyze_package(
             float(item["value"]),
             float(item["score"]),
             f"最新值 {float(item['value']):.3f}，最近一期变化 "
-            f"{float(item['momentum']):+.2%}，暴露权重 {float(item['exposure']):+.0%}",
+            f"{float(item['momentum']):+.2%}，观测截至 {item.get('latest_date', '未知')} "
+            f"（陈旧 {float(item.get('stale_days', 0)):.0f} 天），"
+            f"暴露权重 {float(item['exposure']):+.0%}",
         )
         for item in macro_rows
     ]

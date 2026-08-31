@@ -298,9 +298,11 @@ def macro_assessments(
     weighted_scores: list[float] = []
     total_weight = 0.0
     for series, group in frame.groupby("series"):
-        values = group.sort_values("observation_date")["value"].dropna()
+        ordered = group.sort_values("observation_date")
+        values = ordered["value"].dropna()
         if len(values) < 2 or values.iloc[-2] == 0:
             continue
+        latest_date = pd.Timestamp(ordered.iloc[-1]["observation_date"]).date()
         momentum = float(values.iloc[-1] / values.iloc[-2] - 1)
         score = float(np.clip(np.tanh(momentum * 20), -1, 1))
         direction = -1.0 if str(series) in {"DXY", "US10Y", "SHIBOR"} else 1.0
@@ -315,6 +317,8 @@ def macro_assessments(
                 "score": adjusted,
                 "momentum": momentum,
                 "exposure": exposure,
+                "latest_date": latest_date.isoformat(),
+                "stale_days": float(max(0, (as_of - latest_date).days)),
             }
         )
         if exposure:
