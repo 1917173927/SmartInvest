@@ -508,11 +508,20 @@ def run_automation(
             for symbol in sync_ready:
                 bars = database.load_bars(symbol, analysis_date)
                 actions = database.load_actions(symbol, analysis_date)
-                frame, _ = total_return_frame(bars, actions)
+                frame, return_warnings = total_return_frame(bars, actions)
                 if frame.empty:
                     continue
                 for raw_days in configured_horizons:
                     days = int(raw_days)
+                    if any("超过 35%" in warning for warning in return_warnings):
+                        _task(
+                            summary,
+                            name=f"calibration-{days}d",
+                            status="skipped",
+                            reason="存在未解释的超大单日变动，先修复公司行动",
+                            symbol=symbol,
+                        )
+                        continue
                     state = calibration_weights(database, symbol, days, config)
                     if state.samples >= target:
                         _task(
