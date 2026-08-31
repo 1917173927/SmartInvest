@@ -1,0 +1,28 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Local market/model caches and generated reports
+.stock-analysis/
+06-自动分析/**
+!06-自动分析/README.md
+
+# Personal configuration and Obsidian investment records
+stock-analysis.toml
+.obsidian/
+00-交易总览.md
+01-持仓/
+02-交易日志/
+03-交易系统/
+04-复盘/
+05-模板/
+07-研究资料/

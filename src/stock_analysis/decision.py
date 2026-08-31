@@ -1,0 +1,1042 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import re
+from collections import defaultdict
+from datetime import date
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from pydantic import BaseModel, Field
+
+from stock_analysis.data import AppConfig, Database, DataQuality, FundamentalRecord, utc_now
+from stock_analysis.forecast import ForecastBundle, ModelStatus
+from stock_analysis.indicators import add_indicators, macro_assessments, macro_exposures
+from stock_analysis.research import ResearchResult
+
+
+class Horizon(StrEnum):
+    SHORT = "short"
+    MEDIUM = "medium"
+    LONG = "long"
+    VALUE = "value"
+
+
+HORIZON_LABELS = {
+    Horizon.SHORT: "短线（1–20 个交易日）",
+    Horizon.MEDIUM: "中线（1–6 个月）",
+    Horizon.LONG: "长线（1–3 年）",
+    Horizon.VALUE: "价值（3–10 年）",
+}
+
+
+class MetricAssessment(BaseModel):
+    name: str
+    value: float | None = None
+    score: float
+    available: bool
+    explanation: str
+
+
+class ValuationRange(BaseModel):
+    available: bool
+    fair_low: float | None = None
+    fair_high: float | None = None
+    buy_low: float | None = None
+    buy_high: float | None = None
+    currency: str | None = None
+    method: str
+
+
+class HorizonDecision(BaseModel):
+    horizon: Horizon
+    score: float
+    confidence: float
+    action: str
+    rationale: str
+    target_position: float | None = None
+    staging: str | None = None
+    invalidation_conditions: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class AnalysisPackage(BaseModel):
+    symbol: str
+    name: str
+    as_of: date
+    current_price: float
+    currency: str
+    data_quality: DataQuality
+    data_warnings: list[str]
+    forecasts: list[ForecastBundle]
+    research: ResearchResult
+    technical: list[MetricAssessment]
+    quality: list[MetricAssessment]
+    valuation: list[MetricAssessment]
+    valuation_range: ValuationRange
+    decisions: list[HorizonDecision]
+    receipt_ids: list[str] = Field(default_factory=list)
+    macro: list[MetricAssessment] = Field(default_factory=list)
+    macro_score: float = 0.0
+    chart_paths: list[str] = Field(default_factory=list)
+
+
+class PortfolioPosition(BaseModel):
+    symbol: str | None
+    name: str
+    quantity: float
+    market_value: float
+    currency: str = "CNY"
+    sector: str = "未分类"
+    role: str = "satellite"
+
+
+class PortfolioSnapshot(BaseModel):
+    path: Path
+    as_of: date
+    total_cny_assets: float | None
+    cash_cny: float | None
+    positions: list[PortfolioPosition]
+    warnings: list[str] = Field(default_factory=list)
+
+
+def _clip(value: float) -> float:
+    return float(np.clip(value, -1, 1))
+
+
+def _metric(
+    name: str,
+    value: float | None,
+    score: float,
+    explanation: str,
+) -> MetricAssessment:
+    return MetricAssessment(
+        name=name,
+        value=value,
+        score=_clip(score),
+        available=value is not None,
+        explanation=explanation,
+    )
+
+
+def technical_assessments(frame: pd.DataFrame) -> list[MetricAssessment]:
+    if frame.empty:
+        return [_metric("趋势", None, 0, "无行情数据")]
+    closes = frame["close"].astype(float)
+    enriched = add_indicators(frame)
+    current = float(closes.iloc[-1])
+    results: list[MetricAssessment] = []
+    for window in (20, 60):
+        if len(closes) < window:
+            results.append(_metric(f"相对 MA{window}", None, 0, "样本不足"))
+            continue
+        average = float(closes.tail(window).mean())
+        deviation = current / average - 1
+        score = math.tanh(deviation * 8)
+        results.append(
+            _metric(
+                f"相对 MA{window}",
+                deviation,
+                score,
+                f"现价相对 {window} 日均线 {deviation:+.1%}",
+            )
+        )
+    for window in (20, 60):
+        if len(closes) <= window:
+            continue
+        momentum = current / float(closes.iloc[-window - 1]) - 1
+        results.append(
+            _metric(
+                f"{window}日动量",
+                momentum,
+                math.tanh(momentum * 5),
+                f"{window} 日收益 {momentum:+.1%}",
+            )
+        )
+    returns = frame.get("daily_return", closes.pct_change()).astype(float).dropna()
+    if len(returns) >= 20:
+        volatility = float(returns.tail(120).std(ddof=1) * math.sqrt(252))
+        volatility_score = 0.4 - volatility
+        results.append(
+            _metric(
+                "年化波动率",
+                volatility,
+                volatility_score,
+                f"近 120 日年化波动率 {volatility:.1%}",
+            )
+        )
+    if len(closes) >= 120:
+        rolling_mean = float(closes.tail(120).mean())
+        rolling_std = float(closes.tail(120).std(ddof=1))
+        z_score = (current - rolling_mean) / rolling_std if rolling_std else 0.0
+        anti_chase = -max(0.0, (z_score - 1.5) / 2)
+        results.append(
+            _metric(
+                "追高约束",
+                z_score,
+                anti_chase,
+                f"现价相对 120 日均值为 {z_score:.2f} 个标准差",
+            )
+        )
+    latest = enriched.iloc[-1]
+    macd_hist = float(latest["macd_hist"])
+    current = float(closes.iloc[-1])
+    macd_score = math.tanh(macd_hist / max(abs(current), 1e-9) * 40)
+    results.append(
+        _metric(
+            "MACD 动能",
+            macd_hist / max(abs(current), 1e-9),
+            macd_score,
+            f"MACD 柱线 {'向上' if macd_hist >= 0 else '向下'}，标准化动能 {macd_score:+.2f}",
+        )
+    )
+    rsi = float(latest["rsi14"])
+    rsi_score = float(np.clip((50 - rsi) / 50, -1, 1))
+    results.append(
+        _metric(
+            "RSI14",
+            rsi / 100,
+            rsi_score,
+            f"RSI14 {rsi:.1f}；低位反弹与高位追涨均需结合趋势确认",
+        )
+    )
+    volume_ratio = float(latest["volume_ratio20"])
+    results.append(
+        _metric(
+            "成交量/20日均量",
+            volume_ratio,
+            float(np.clip((volume_ratio - 1) / 2, -1, 1)),
+            f"成交量约为 20 日均量的 {volume_ratio:.2f} 倍",
+        )
+    )
+    return results
+
+
+def _value(records: dict[str, FundamentalRecord], key: str) -> float | None:
+    item = records.get(key)
+    if item is None or not math.isfinite(item.value):
+        return None
+    return float(item.value)
+
+
+def quality_assessments(records: dict[str, FundamentalRecord]) -> list[MetricAssessment]:
+    results: list[MetricAssessment] = []
+    roe = _value(records, "roe")
+    if roe is not None:
+        score = (roe - 0.08) / 0.12
+        results.append(_metric("ROE", roe, score, f"ROE {roe:.1%}"))
+    else:
+        results.append(_metric("ROE", None, 0, "缺少可核验 ROE"))
+
+    net_income = _value(records, "net_income")
+    operating_cash_flow = _value(records, "operating_cash_flow")
+    if net_income and operating_cash_flow is not None and net_income > 0:
+        cash_quality = operating_cash_flow / net_income
+        results.append(
+            _metric(
+                "现金流/利润",
+                cash_quality,
+                (cash_quality - 0.7) / 0.6,
+                f"经营现金流约为净利润的 {cash_quality:.2f} 倍",
+            )
+        )
+    else:
+        results.append(_metric("现金流/利润", None, 0, "缺少同期现金流与净利润"))
+
+    assets = _value(records, "assets")
+    liabilities = _value(records, "liabilities")
+    if assets and liabilities is not None:
+        liability_ratio = liabilities / assets
+        results.append(
+            _metric(
+                "资产负债率",
+                liability_ratio,
+                (0.65 - liability_ratio) / 0.35,
+                f"资产负债率 {liability_ratio:.1%}；金融企业需结合行业口径解释",
+            )
+        )
+    else:
+        debt_to_equity = _value(records, "debt_to_equity")
+        if debt_to_equity is not None:
+            results.append(
+                _metric(
+                    "债务/权益",
+                    debt_to_equity,
+                    (1.0 - debt_to_equity) / 1.5,
+                    f"债务权益比 {debt_to_equity:.2f}",
+                )
+            )
+        else:
+            results.append(_metric("杠杆", None, 0, "缺少可比较杠杆数据"))
+
+    dividend = _value(records, "dividend_yield")
+    if dividend is not None:
+        results.append(
+            _metric(
+                "股息率",
+                dividend,
+                (dividend - 0.02) / 0.04,
+                f"近端股息率 {dividend:.1%}，仍需验证现金来源与持续性",
+            )
+        )
+    else:
+        results.append(_metric("股息率", None, 0, "缺少股息率"))
+    return results
+
+
+def valuation_assessments(
+    records: dict[str, FundamentalRecord], profile: dict[str, Any]
+) -> list[MetricAssessment]:
+    results: list[MetricAssessment] = []
+    pe = _value(records, "pe")
+    pb = _value(records, "pb")
+    dividend = _value(records, "dividend_yield")
+    fair_pe = float(profile.get("fair_pe", 15.0))
+    fair_pb = float(profile.get("fair_pb", 1.5))
+    model = str(profile.get("valuation_model", "generic"))
+    if pe is not None and pe > 0:
+        results.append(
+            _metric(
+                "PE",
+                pe,
+                (fair_pe / pe - 1) * 1.5,
+                f"PE {pe:.2f} 倍，对照保守参考 {fair_pe:.2f} 倍",
+            )
+        )
+    else:
+        results.append(_metric("PE", None, 0, "盈利为负或缺少 PE，不能据此判定便宜"))
+    if pb is not None and pb > 0:
+        multiplier = 1.4 if model in {"bank", "insurer"} else 1.0
+        results.append(
+            _metric(
+                "PB",
+                pb,
+                (fair_pb / pb - 1) * multiplier,
+                f"PB {pb:.2f} 倍，对照保守参考 {fair_pb:.2f} 倍",
+            )
+        )
+    else:
+        results.append(_metric("PB", None, 0, "缺少 PB"))
+    if dividend is not None:
+        results.append(
+            _metric(
+                "股息安全垫",
+                dividend,
+                (dividend - 0.025) / 0.035,
+                f"股息率 {dividend:.1%}；不等同于分红可持续",
+            )
+        )
+    else:
+        results.append(_metric("股息安全垫", None, 0, "缺少股息率"))
+    return results
+
+
+def valuation_range(
+    *,
+    current_price: float,
+    currency: str,
+    records: dict[str, FundamentalRecord],
+    profile: dict[str, Any],
+    override_low: float | None = None,
+    override_high: float | None = None,
+) -> ValuationRange:
+    if override_low is not None and override_high is not None:
+        if override_low <= 0 or override_high < override_low:
+            raise ValueError("人工合理价值区间无效")
+        margin = 0.25
+        return ValuationRange(
+            available=True,
+            fair_low=override_low,
+            fair_high=override_high,
+            buy_low=override_low * (1 - margin),
+            buy_high=override_low,
+            currency=currency,
+            method="人工合理价值区间 + 25% 安全边际",
+        )
+    estimates: list[float] = []
+    methods: list[str] = []
+    pe = _value(records, "pe")
+    pb = _value(records, "pb")
+    fair_pe = profile.get("fair_pe")
+    fair_pb = profile.get("fair_pb")
+    if pe and pe > 0 and fair_pe:
+        estimates.append(current_price * float(fair_pe) / pe)
+        methods.append("PE")
+    if pb and pb > 0 and fair_pb:
+        estimates.append(current_price * float(fair_pb) / pb)
+        methods.append("PB")
+    if not estimates:
+        return ValuationRange(
+            available=False,
+            currency=currency,
+            method="缺少 EPS/BVPS、PE/PB 或人工价值区间，拒绝伪造买入价",
+        )
+    central = float(np.median(estimates))
+    model = str(profile.get("valuation_model", "generic"))
+    width = 0.20 if model in {"bank", "insurer"} else 0.30 if model == "cyclical" else 0.25
+    safety_margin = 0.20 if model in {"bank", "insurer"} else 0.30
+    fair_low = central * (1 - width)
+    fair_high = central * (1 + width)
+    return ValuationRange(
+        available=True,
+        fair_low=fair_low,
+        fair_high=fair_high,
+        buy_low=fair_low * (1 - safety_margin),
+        buy_high=fair_low,
+        currency=currency,
+        method="/".join(methods) + f" 隐含盈利/净资产情景，{safety_margin:.0%} 安全边际",
+    )
+
+
+def _average_score(items: list[MetricAssessment], preferred: set[str] | None = None) -> float:
+    candidates = [item for item in items if item.available]
+    if preferred:
+        preferred_items = [item for item in candidates if item.name in preferred]
+        if preferred_items:
+            candidates = preferred_items
+    return float(np.mean([item.score for item in candidates])) if candidates else 0.0
+
+
+def _forecast_score(bundle: ForecastBundle | None) -> float:
+    if bundle is None:
+        return 0.0
+    estimate = bundle.ensemble
+    horizon_vol = max(estimate.annualized_volatility * math.sqrt(bundle.horizon_days / 252), 0.02)
+    return _clip(
+        0.55 * math.tanh(estimate.q50 / horizon_vol) + 0.45 * (estimate.up_probability - 0.5) * 2
+    )
+
+
+def _decision_action(
+    *,
+    score: float,
+    confidence: float,
+    data_quality: DataQuality,
+    valuation: ValuationRange,
+    current_price: float,
+    quality_score: float,
+    current_weight: float | None,
+    position_limit: float,
+    investor_allowed: bool,
+    forecast_drawdown: float | None,
+    maximum_drawdown: float,
+) -> str:
+    if not investor_allowed:
+        return "回避（资金属性或杠杆不符合纪律）"
+    if quality_score < -0.35:
+        return "回避/重审退出"
+    if current_weight is not None and current_weight > position_limit:
+        return "停止加仓；复核减仓"
+    if forecast_drawdown is not None and forecast_drawdown > maximum_drawdown:
+        return "观察；潜在回撤超预算"
+    if data_quality is DataQuality.C or confidence < 0.35:
+        return "暂不判断"
+    if score >= 0.35:
+        if valuation.available and valuation.buy_high and current_price > valuation.buy_high:
+            return "观察；等待安全边际"
+        return "分批买入"
+    if score >= 0.05:
+        return "持有/观察"
+    if score > -0.25:
+        return "观察；暂停加仓"
+    return "减仓/回避"
+
+
+def build_decisions(
+    *,
+    config: AppConfig,
+    forecasts: list[ForecastBundle],
+    research: ResearchResult,
+    technical: list[MetricAssessment],
+    quality: list[MetricAssessment],
+    valuation: list[MetricAssessment],
+    value_range: ValuationRange,
+    current_price: float,
+    data_quality: DataQuality,
+    current_weight: float | None = None,
+    role: str = "satellite",
+    macro_score: float = 0.0,
+) -> list[HorizonDecision]:
+    forecast_by_days = {item.horizon_days: item for item in forecasts}
+    technical_score = _average_score(technical)
+    quality_score = _average_score(quality)
+    valuation_score = _average_score(valuation)
+    llm_score = research.event_score
+    available_fundamental = sum(item.available for item in quality + valuation)
+    fundamental_confidence = min(1.0, available_fundamental / 6)
+    investor = config.section("investor")
+    investor_allowed = bool(investor.get("capital_is_surplus", False)) and not bool(
+        investor.get("uses_leverage", True)
+    )
+    risk = config.section("risk")
+    maximum_drawdown = float(risk.get("max_portfolio_drawdown", 0.25))
+    short_trade_risk = float(risk.get("short_trade_risk", 0.01))
+    position_limit = float(
+        risk.get("core_position_limit", 0.35)
+        if role == "core"
+        else risk.get("satellite_position_limit", 0.15)
+    )
+    safety_score = 0.0
+    if value_range.available and value_range.fair_low and value_range.fair_high:
+        if current_price <= value_range.fair_low:
+            safety_score = 1.0
+        elif current_price >= value_range.fair_high:
+            safety_score = -1.0
+        else:
+            midpoint = (value_range.fair_low + value_range.fair_high) / 2
+            half_range = max((value_range.fair_high - value_range.fair_low) / 2, 1e-9)
+            safety_score = float(np.clip((midpoint - current_price) / half_range, -1, 1))
+    decisions: list[HorizonDecision] = []
+    for horizon in Horizon:
+        if horizon is Horizon.SHORT:
+            forecast = forecast_by_days.get(20)
+            deterministic_score = technical_score
+            score = _clip(
+                _forecast_score(forecast) * 0.30
+                + technical_score * 0.35
+                + macro_score * 0.20
+                + llm_score * 0.15
+            )
+        elif horizon is Horizon.MEDIUM:
+            forecast = forecast_by_days.get(120)
+            deterministic_score = quality_score * 0.5 + valuation_score * 0.5
+            score = _clip(
+                deterministic_score * 0.40
+                + technical_score * 0.20
+                + macro_score * 0.20
+                + llm_score * 0.20
+            )
+        elif horizon is Horizon.LONG:
+            forecast = None
+            deterministic_score = quality_score * 0.60 + valuation_score * 0.40
+            score = _clip(
+                deterministic_score * 0.65 + macro_score * 0.15 + llm_score * 0.20
+            )
+        else:
+            forecast = None
+            deterministic_score = quality_score * 0.40 + valuation_score * 0.60
+            score = _clip(
+                deterministic_score * 0.70 + safety_score * 0.20 + llm_score * 0.10
+            )
+        calibration_confidence = 0.4
+        warnings: list[str] = []
+        if forecast:
+            calibration_confidence = (
+                0.8
+                if forecast.status.value == "active"
+                else 0.5
+                if forecast.status.value == "experimental"
+                else 0.25
+            )
+            warnings.extend(forecast.warnings)
+        llm_confidence = 0.75 if research.events else 0.25
+        confidence = float(
+            np.clip(
+                0.35 * fundamental_confidence
+                + 0.35 * calibration_confidence
+                + 0.20 * llm_confidence
+                + (0.10 if data_quality is not DataQuality.C else 0),
+                0,
+                1,
+            )
+        )
+        action = _decision_action(
+            score=score,
+            confidence=confidence,
+            data_quality=data_quality,
+            valuation=value_range,
+            current_price=current_price,
+            quality_score=quality_score,
+            current_weight=current_weight,
+            position_limit=position_limit,
+            investor_allowed=investor_allowed,
+            forecast_drawdown=forecast.ensemble.potential_drawdown if forecast else None,
+            maximum_drawdown=maximum_drawdown,
+        )
+        if research.status != "ready":
+            warnings.append("LLM 事件因子不可用或没有通过证据校验")
+        if available_fundamental < 3:
+            warnings.append("公司质量与估值数据不完整")
+        target_position: float | None = None
+        staging: str | None = None
+        if action == "分批买入":
+            initial = 0.10 if role == "core" else 0.05
+            risk_position_limit = position_limit
+            if horizon is Horizon.SHORT and forecast:
+                risk_position_limit = min(
+                    position_limit,
+                    short_trade_risk / max(forecast.ensemble.potential_drawdown, 0.01),
+                )
+            if current_weight is not None and current_weight >= risk_position_limit:
+                action = "持有；短线风险预算已满"
+                target_position = current_weight
+            else:
+                target_position = min(
+                    position_limit,
+                    risk_position_limit,
+                    (current_weight or 0) + initial,
+                )
+                staging = "三批 40%/30%/30%；每批前重新检查估值、事件与组合上限"
+        elif current_weight is not None:
+            target_position = min(current_weight, position_limit)
+        rationale = (
+            f"预测={_forecast_score(forecast):+.2f}，确定性规则={deterministic_score:+.2f}，"
+            f"宏观={macro_score:+.2f}，新闻证据={llm_score:+.2f}；综合={score:+.2f}。"
+        )
+        decisions.append(
+            HorizonDecision(
+                horizon=horizon,
+                score=score,
+                confidence=confidence,
+                action=action,
+                rationale=rationale,
+                target_position=target_position,
+                staging=staging,
+                invalidation_conditions=[
+                    "盈利与经营现金流持续背离，或分红依赖举债",
+                    "竞争优势、治理诚信或资本配置出现可验证恶化",
+                    "估值假设所依赖的盈利/净资产基础发生下修",
+                    "仓位、行业集中度、现金底线或组合回撤突破硬约束",
+                ],
+                warnings=list(dict.fromkeys(warnings)),
+            )
+        )
+    return decisions
+
+
+def analyze_package(
+    *,
+    config: AppConfig,
+    database: Database,
+    symbol: str,
+    as_of: date,
+    frame: pd.DataFrame,
+    data_quality: DataQuality,
+    data_warnings: list[str],
+    forecasts: list[ForecastBundle],
+    research: ResearchResult,
+    current_weight: float | None = None,
+    fair_value_low: float | None = None,
+    fair_value_high: float | None = None,
+) -> AnalysisPackage:
+    if frame.empty:
+        raise ValueError("没有可分析行情")
+    price = float(frame.iloc[-1]["close"])
+    currency = str(frame.iloc[-1].get("currency", ""))
+    profile = config.asset(symbol)
+    records = database.latest_fundamentals(symbol, as_of)
+    technical = technical_assessments(frame)
+    quality = quality_assessments(records)
+    valuation = valuation_assessments(records, profile)
+    macro_rows, macro_score = macro_assessments(database, as_of, macro_exposures(profile))
+    macro = [
+        _metric(
+            str(item["name"]),
+            float(item["value"]),
+            float(item["score"]),
+            f"最新值 {float(item['value']):.3f}，最近一期变化 "
+            f"{float(item['momentum']):+.2%}，暴露权重 {float(item['exposure']):+.0%}",
+        )
+        for item in macro_rows
+    ]
+    value_range = valuation_range(
+        current_price=price,
+        currency=currency,
+        records=records,
+        profile=profile,
+        override_low=fair_value_low,
+        override_high=fair_value_high,
+    )
+    decisions = build_decisions(
+        config=config,
+        forecasts=forecasts,
+        research=research,
+        technical=technical,
+        quality=quality,
+        valuation=valuation,
+        value_range=value_range,
+        current_price=price,
+        data_quality=data_quality,
+        current_weight=current_weight,
+        role=str(profile.get("role", "satellite")),
+        macro_score=macro_score,
+    )
+    return AnalysisPackage(
+        symbol=symbol,
+        name=str(profile.get("name", symbol)),
+        as_of=as_of,
+        current_price=price,
+        currency=currency,
+        data_quality=data_quality,
+        data_warnings=data_warnings,
+        forecasts=forecasts,
+        research=research,
+        technical=technical,
+        quality=quality,
+        valuation=valuation,
+        valuation_range=value_range,
+        decisions=decisions,
+        macro=macro,
+        macro_score=macro_score,
+    )
+
+
+def create_receipts(database: Database, package: AnalysisPackage) -> list[str]:
+    decision_by_horizon = {item.horizon: item for item in package.decisions}
+    ids: list[str] = []
+    for bundle in package.forecasts:
+        horizon = Horizon.SHORT if bundle.horizon_days <= 20 else Horizon.MEDIUM
+        decision = decision_by_horizon[horizon]
+        receipt_id = (
+            "fc-"
+            + hashlib.sha256(
+                f"{package.symbol}:{package.as_of}:{bundle.horizon_days}".encode()
+            ).hexdigest()[:16]
+        )
+        database.save_receipt(
+            {
+                "id": receipt_id,
+                "symbol": package.symbol,
+                "created_at": utc_now().isoformat(),
+                "as_of": package.as_of.isoformat(),
+                "horizon_days": bundle.horizon_days,
+                "due_date": bundle.due_date.isoformat(),
+                "model_status": bundle.status.value,
+                "forecast": {
+                    "ensemble": bundle.ensemble.model_dump(mode="json"),
+                    "components": {
+                        key: value.model_dump(mode="json")
+                        for key, value in bundle.components.items()
+                    },
+                    "weights": bundle.weights,
+                    "data_quality": bundle.data_quality.value,
+                    "warnings": bundle.warnings,
+                },
+                "decision": decision.model_dump(mode="json"),
+                "evidence": [item.id for item in package.research.evidence],
+            }
+        )
+        ids.append(receipt_id)
+    package.receipt_ids = ids
+    return ids
+
+
+def _fmt_percent(value: float | None, digits: int = 1) -> str:
+    return "—" if value is None else f"{value:.{digits}%}"
+
+
+def _fmt_number(value: float | None, digits: int = 2) -> str:
+    return "—" if value is None else f"{value:.{digits}f}"
+
+
+def render_analysis_markdown(package: AnalysisPackage) -> str:
+    lines = [
+        "---",
+        "type: automated-stock-analysis",
+        f"symbol: {package.symbol}",
+        f"date: {package.as_of.isoformat()}",
+        f"data_quality: {package.data_quality.value}",
+        "status: generated",
+        "---",
+        "",
+        f"# {package.name}（{package.symbol}）多周期分析",
+        "",
+        "> [!warning] 决策边界",
+        "> 这是概率化研究与纪律检查，不是收益保证或自动交易指令。"
+        "C 级数据、低置信度或模型失配时，系统会留白。",
+        "",
+        "## 结论：多周期冲突卡",
+        "",
+        "| 周期 | 综合分 | 置信度 | 行动 | 目标仓位 |",
+        "|---|---:|---:|---|---:|",
+    ]
+    for item in package.decisions:
+        lines.append(
+            f"| {HORIZON_LABELS[item.horizon]} | {item.score:+.2f} | {item.confidence:.0%} | "
+            f"{item.action} | {_fmt_percent(item.target_position, 0)} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 数据与价格",
+            "",
+            f"- 分析截止：{package.as_of.isoformat()}",
+            f"- 最新价格：{package.current_price:.3f} {package.currency}",
+            f"- 数据质量：**{package.data_quality.value}**",
+        ]
+    )
+    for warning in package.data_warnings:
+        lines.append(f"- 数据警告：{warning}")
+    if package.chart_paths:
+        lines.extend(["", "## 技术图表", ""])
+        for chart_path in package.chart_paths:
+            lines.append(f"![{package.name} K线与技术指标](<{chart_path}>)")
+    lines.extend(
+        [
+            "",
+            "## 概率预测",
+            "",
+            "| 期限 | 状态 | 基线/Chronos 权重 | Q10 | 中位数 | Q90 | 上涨概率 | 潜在回撤 |",
+            "|---:|---|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    degraded_horizons: list[int] = []
+    for bundle in package.forecasts:
+        weight_text = "/".join(f"{name} {weight:.1%}" for name, weight in bundle.weights.items())
+        estimate = bundle.ensemble
+        status_text = (
+            f"{bundle.status.value} ({bundle.calibration_samples}/{bundle.calibration_target})"
+        )
+        lines.append(
+            f"| {bundle.horizon_days}日 | {status_text} | {weight_text} | "
+            f"{estimate.q10:+.1%} | {estimate.q50:+.1%} | {estimate.q90:+.1%} | "
+            f"{estimate.up_probability:.0%} | {estimate.potential_drawdown:.1%} |"
+        )
+        if bundle.status in {ModelStatus.DEGRADED, ModelStatus.DISABLED}:
+            degraded_horizons.append(bundle.horizon_days)
+    if not package.forecasts:
+        lines.append("| — | 长期/价值模式不使用价格路径预测 | — | — | — | — | — | — |")
+    if degraded_horizons:
+        lines.extend(
+            [
+                "",
+                "> [!warning] "
+                + "、".join(f"{days}日" for days in degraded_horizons)
+                + "预测当前仅使用随机游走基线；Chronos 未参与，结果仅作保守参考。",
+            ]
+        )
+    lines.extend(["", "## 企业质量与估值", ""])
+    lines.append("| 类别 | 指标 | 数值 | 评分 | 说明 |")
+    lines.append("|---|---|---:|---:|---|")
+    for category, items in (
+        ("质量", package.quality),
+        ("估值", package.valuation),
+        ("市场", package.technical),
+        ("宏观", package.macro),
+    ):
+        for item in items:
+            value = _fmt_number(item.value) if item.available else "—"
+            lines.append(
+                f"| {category} | {item.name} | {value} | {item.score:+.2f} | {item.explanation} |"
+            )
+    value_range = package.valuation_range
+    lines.extend(["", "### 合理价值与安全边际", ""])
+    if value_range.available:
+        lines.extend(
+            [
+                f"- 合理价值区间：{value_range.fair_low:.2f}–"
+                f"{value_range.fair_high:.2f} {value_range.currency}",
+                f"- 分批买入观察区间：{value_range.buy_low:.2f}–"
+                f"{value_range.buy_high:.2f} {value_range.currency}",
+                f"- 方法：{value_range.method}",
+            ]
+        )
+    else:
+        lines.append(f"- 暂不生成价格区间：{value_range.method}")
+    lines.extend(["", "## LLM 证据与事件", "", package.research.summary, ""])
+    if package.research.events:
+        lines.extend(
+            [
+                "| 类型 | 方向 | 强度 | 置信度 | 生效/失效 | 证据 |",
+                "|---|---:|---:|---:|---|---|",
+            ]
+        )
+        for event in package.research.events:
+            lines.append(
+                f"| {event.event_type.value} | {event.direction:+d} | {event.strength:.0%} | "
+                f"{event.confidence:.0%} | {event.effective_from}/{event.expires_at} | "
+                f"{event.evidence_id} |"
+            )
+    else:
+        lines.append("- 没有通过证据和日期校验的 LLM 事件因子。")
+    if package.research.evidence:
+        lines.extend(["", "证据索引："])
+        for item in package.research.evidence:
+            lines.append(
+                f"- [{item.id}] [{item.title}]({item.source_url})，发布于 {item.published_at}"
+            )
+    lines.extend(["", "## 行动计划与反证", ""])
+    for decision in package.decisions:
+        lines.extend(
+            [
+                f"### {HORIZON_LABELS[decision.horizon]}",
+                "",
+                f"- 行动：**{decision.action}**",
+                f"- 依据：{decision.rationale}",
+            ]
+        )
+        if decision.staging:
+            lines.append(f"- 分批：{decision.staging}")
+        if decision.target_position is not None:
+            lines.append(f"- 目标仓位上限：{decision.target_position:.0%}")
+        for condition in decision.invalidation_conditions:
+            lines.append(f"- 反证条件：{condition}")
+        for warning in decision.warnings:
+            lines.append(f"- 警告：{warning}")
+        lines.append("")
+    lines.extend(["## 预测回执", ""])
+    if package.receipt_ids:
+        lines.extend(f"- `{receipt_id}`" for receipt_id in package.receipt_ids)
+    else:
+        lines.append("- 本次没有短中期预测，因此未创建预测回执。")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _parse_number(text: str) -> float:
+    cleaned = text.replace(",", "").replace("+", "").strip()
+    match = re.search(r"-?\d+(?:\.\d+)?", cleaned)
+    return float(match.group()) if match else 0.0
+
+
+def latest_portfolio_snapshot(config: AppConfig) -> PortfolioSnapshot:
+    candidates = sorted((config.home / "01-持仓").glob("*-持仓快照.md"), reverse=True)
+    if not candidates:
+        raise FileNotFoundError("01-持仓 中没有持仓快照")
+    path = candidates[0]
+    text = path.read_text(encoding="utf-8")
+    date_match = re.search(r"^date:\s*(\d{4}-\d{2}-\d{2})", text, flags=re.MULTILINE)
+    as_of = (
+        date.fromisoformat(date_match.group(1))
+        if date_match
+        else date.fromisoformat(path.name[:10])
+    )
+    total_match = re.search(r"已记录人民币资产暂为\s*\*\*([\d,.]+)\s*元", text)
+    total_assets = _parse_number(total_match.group(1)) if total_match else None
+    positions: list[PortfolioPosition] = []
+    section_match = re.search(r"## A 股明细\n(.*?)(?=\n## )", text, flags=re.DOTALL)
+    if section_match:
+        rows = [line for line in section_match.group(1).splitlines() if line.startswith("|")]
+        for line in rows[2:]:
+            cells = [cell.strip().replace("**", "") for cell in line.strip("|").split("|")]
+            if len(cells) < 5 or cells[0] in {"合计", ""}:
+                continue
+            name = cells[0]
+            symbol = config.symbol_for_name(name)
+            profile = config.asset(symbol) if symbol else {}
+            positions.append(
+                PortfolioPosition(
+                    symbol=symbol,
+                    name=name,
+                    quantity=_parse_number(cells[1].split("/")[0]),
+                    market_value=_parse_number(cells[4]),
+                    sector=str(profile.get("sector", "未分类")),
+                    role=str(profile.get("role", "satellite")),
+                )
+            )
+    cash = 0.0
+    cash_found = False
+    view_match = re.search(r"## 人民币资产视图\n(.*?)(?=\n## |\Z)", text, flags=re.DOTALL)
+    if view_match:
+        for line in view_match.group(1).splitlines():
+            if not line.startswith("|"):
+                continue
+            cells = [cell.strip().replace("**", "") for cell in line.strip("|").split("|")]
+            if len(cells) >= 2 and ("现金" in cells[0] or "赎回款" in cells[0]):
+                cash += _parse_number(cells[1])
+                cash_found = True
+    warnings: list[str] = []
+    if total_assets is None:
+        warnings.append("未解析到完整人民币资产合计，仓位只能按已解析资产估算")
+    if any(item.symbol is None for item in positions):
+        warnings.append("部分持仓名称没有映射到标准证券代码")
+    warnings.append("港币和美元资产未折算，不作为完整组合权重")
+    return PortfolioSnapshot(
+        path=path,
+        as_of=as_of,
+        total_cny_assets=total_assets,
+        cash_cny=cash if cash_found else None,
+        positions=positions,
+        warnings=warnings,
+    )
+
+
+def position_weight(snapshot: PortfolioSnapshot, symbol: str) -> float | None:
+    if not snapshot.total_cny_assets:
+        return None
+    for item in snapshot.positions:
+        if item.symbol == symbol:
+            return item.market_value / snapshot.total_cny_assets
+    return 0.0
+
+
+def render_portfolio_markdown(
+    snapshot: PortfolioSnapshot, config: AppConfig, database: Database
+) -> str:
+    risk = config.section("risk")
+    sector_values: dict[str, float] = defaultdict(float)
+    for item in snapshot.positions:
+        sector_values[item.sector] += item.market_value
+    total = snapshot.total_cny_assets or sum(item.market_value for item in snapshot.positions)
+    cash_weight = snapshot.cash_cny / total if snapshot.cash_cny is not None and total else None
+    lines = [
+        "---",
+        "type: automated-portfolio-analysis",
+        f"date: {date.today().isoformat()}",
+        f"snapshot_date: {snapshot.as_of.isoformat()}",
+        "status: generated",
+        "---",
+        "",
+        f"# {snapshot.as_of.isoformat()} 持仓自动检查",
+        "",
+        f"来源：[[{snapshot.path.relative_to(config.home).with_suffix('')}]]",
+        "",
+        "## 硬约束检查",
+        "",
+        "| 标的 | 角色 | 市值 | 组合占比 | 上限 | 结论 |",
+        "|---|---|---:|---:|---:|---|",
+    ]
+    for item in snapshot.positions:
+        weight = item.market_value / total if total else 0.0
+        limit = float(
+            risk.get("core_position_limit", 0.35)
+            if item.role == "core"
+            else risk.get("satellite_position_limit", 0.15)
+        )
+        conclusion = "超限，停止加仓并复核" if weight > limit else "合规"
+        lines.append(
+            f"| {item.name} | {item.role} | {item.market_value:,.2f} CNY | "
+            f"{weight:.1%} | {limit:.0%} | {conclusion} |"
+        )
+    lines.extend(["", "### 行业与现金", ""])
+    sector_limit = float(risk.get("sector_limit", 0.60))
+    for sector, market_value in sorted(
+        sector_values.items(), key=lambda item: item[1], reverse=True
+    ):
+        weight = market_value / total if total else 0.0
+        conclusion = "超限" if weight > sector_limit else "合规"
+        lines.append(f"- {sector}：{weight:.1%}（上限 {sector_limit:.0%}，{conclusion}）")
+    if cash_weight is not None:
+        cash_floor = float(risk.get("cash_floor", 0.05))
+        conclusion = "低于底线" if cash_weight < cash_floor else "合规"
+        lines.append(f"- 现金类：{cash_weight:.1%}（底线 {cash_floor:.0%}，{conclusion}）")
+    lines.extend(["", "## 最近预测回执", ""])
+    for item in snapshot.positions:
+        if not item.symbol:
+            continue
+        rows = database.receipts(symbol=item.symbol)[-5:]
+        if not rows:
+            lines.append(f"- {item.name}：没有预测回执")
+            continue
+        states: list[str] = []
+        for row in rows:
+            decision = json.loads(row["decision_json"])
+            states.append(
+                f"{row['horizon_days']}日 {decision.get('action', '—')} ({row['status']})"
+            )
+        lines.append(f"- {item.name}：" + "；".join(states))
+    lines.extend(["", "## 数据边界", ""])
+    lines.extend(f"- {warning}" for warning in snapshot.warnings)
+    lines.extend(
+        [
+            "- 组合检查执行仓位纪律，不因模型短期看多而放宽单股、行业或现金约束。",
+            "- 本报告不包含自动下单。",
+            "",
+        ]
+    )
+    return "\n".join(lines)

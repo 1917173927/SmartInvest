@@ -1,0 +1,67 @@
+[risk]
+max_portfolio_drawdown = 0.25
+core_position_limit = 0.35
+satellite_position_limit = 0.15
+sector_limit = 0.60
+cash_floor = 0.05
+short_trade_risk = 0.01
+
+[investor]
+base_currency = "CNY"
+capital_is_surplus = true
+uses_leverage = false
+minimum_horizon_years = 3
+
+[forecast]
+model_id = "amazon/chronos-2"
+device = "cpu"
+minimum_history_days = 756
+context_length = 512
+initial_chronos_weight = 0.50
+minimum_calibration_samples = 100
+disable_after_consecutive_losses = 60
+
+[research]
+event_whitelist = [
+  "earnings",
+  "guidance",
+  "policy",
+  "management",
+  "regulatory_legal",
+  "commodity",
+  "capital_allocation",
+]
+
+[automation]
+use_llm = true
+use_chronos = true
+sync_lookback_years = 5
+evidence_dirs = ["07-研究资料"]
+auto_calibrate = true
+calibration_horizons = [20]
+calibration_max_windows = 100
+calibration_step = 1
+calibration_cooldown_days = 7
+news_refresh_hours = 12
+macro_refresh_hours = 24
+max_runtime_minutes = 20
+
+[macro]
+enabled = true
+series = ["WTI", "GOLD", "DXY", "US10Y", "SHIBOR", "CSI300"]
+
+[charts]
+enabled = true
+format = "svg"
+include_macd = true
+include_rsi = true
+include_volume = true
+
+# 复制本段增加自己的标的。真实配置被 .gitignore 排除。
+[assets."CN:601318"]
+name = "中国平安"
+sector = "金融"
+role = "core"
+valuation_model = "insurer"
+fair_pe = 9.0
+fair_pb = 1.10
