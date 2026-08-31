@@ -260,6 +260,7 @@ def render_summary_markdown(config: AppConfig, summary: AutomationSummary) -> st
         lines.append(
             "- 失败标的：" + "；".join(f"{key}（{value}）" for key, value in summary.failed.items())
         )
+    failed_tasks = [item for item in summary.tasks if item["status"] == "failed"]
     lines.extend(
         [
             f"- 到期回执核对：{summary.evaluated_receipts} 条",
@@ -276,16 +277,6 @@ def render_summary_markdown(config: AppConfig, summary: AutomationSummary) -> st
             "",
             "### 需要关注的失败任务",
             "",
-            "| 标的 | 任务 | 原因 |",
-            "|---|---|---|",
-            *[
-                f"| {item['symbol']} | {item['task']} | {item['reason']} |"
-                for item in summary.tasks
-                if item["status"] == "failed"
-            ],
-            "- 无失败任务。"
-            if not any(item["status"] == "failed" for item in summary.tasks)
-            else "",
             "",
             "## 使用方式",
             "",
@@ -294,6 +285,20 @@ def render_summary_markdown(config: AppConfig, summary: AutomationSummary) -> st
             "",
         ]
     )
+    if failed_tasks:
+        insert_at = lines.index("### 需要关注的失败任务") + 1
+        lines[insert_at:insert_at] = [
+            "",
+            "| 标的 | 任务 | 原因 |",
+            "|---|---|---|",
+            *[
+                f"| {item['symbol']} | {item['task']} | {item['reason']} |"
+                for item in failed_tasks
+            ],
+        ]
+    else:
+        insert_at = lines.index("### 需要关注的失败任务") + 1
+        lines.insert(insert_at, "- 无失败任务。")
     return "\n".join(lines)
 
 
