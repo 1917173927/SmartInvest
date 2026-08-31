@@ -302,17 +302,22 @@ def render_summary_markdown(config: AppConfig, summary: AutomationSummary) -> st
         lines.insert(insert_at, "- 无失败任务。")
     if summary.calibration_progress:
         marker = "## 运行状态"
+        progress_rows = []
+        for symbol, horizons in summary.calibration_progress.items():
+            active = [days for days, info in horizons.items() if info.get("status") == "active"]
+            experimental = [
+                days for days, info in horizons.items() if info.get("status") == "experimental"
+            ]
+            progress_rows.append(
+                f"| {symbol} | {', '.join(f'{days}日' for days in active) or '—'} | "
+                f"{', '.join(f'{days}日' for days in experimental) or '—'} |"
+            )
         progress_lines = [
             "## 校准进度",
             "",
-            "| 标的 | 期限 | 样本 | 状态 |",
-            "|---|---:|---:|---|",
-            *[
-                f"| {symbol} | {days}日 | {info.get('samples', 0)}/{info.get('target', 0)} | "
-                f"{info.get('status', 'unknown')} |"
-                for symbol, horizons in summary.calibration_progress.items()
-                for days, info in horizons.items()
-            ],
+            "| 标的 | 已激活期限 | 实验/待校准期限 |",
+            "|---|---|---|",
+            *progress_rows,
             "",
         ]
         lines[lines.index(marker):lines.index(marker)] = progress_lines
@@ -349,6 +354,22 @@ def render_task_log(summary: AutomationSummary) -> str:
         "",
         f"- 成功标的：{len(summary.succeeded)}；失败标的：{len(summary.failed)}",
     ]
+    if summary.calibration_progress:
+        lines.extend(
+            [
+                "",
+                "## 逐期限校准进度",
+                "",
+                "| 标的 | 期限 | 样本 | 状态 |",
+                "|---|---:|---:|---|",
+                *[
+                    f"| {symbol} | {days}日 | {info.get('samples', 0)}/{info.get('target', 0)} | "
+                    f"{info.get('status', 'unknown')} |"
+                    for symbol, horizons in summary.calibration_progress.items()
+                    for days, info in horizons.items()
+                ],
+            ]
+        )
     return "\n".join(lines)
 
 
