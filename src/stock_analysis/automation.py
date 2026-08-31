@@ -223,6 +223,7 @@ def organize_reports(config: AppConfig) -> list[Path]:
 def render_summary_markdown(config: AppConfig, summary: AutomationSummary) -> str:
     portfolio_name = summary.portfolio_report.name if summary.portfolio_report else "未生成"
     portfolio_link = f"组合/{portfolio_name}" if summary.portfolio_report else ""
+    log_name = f"{summary.as_of.isoformat()}-{summary.run_id}.md"
     lines = [
         "---",
         "type: automated-summary",
@@ -265,18 +266,30 @@ def render_summary_markdown(config: AppConfig, summary: AutomationSummary) -> st
             f"- 自动校准：{sum(len(items) for items in summary.calibrated.values())} 个期限",
             f"- 组合检查：[{portfolio_name}]({portfolio_link})",
             "",
-            "## 自动任务状态",
+            "## 运行状态",
             "",
-            "| 标的 | 任务 | 状态 | 原因 |",
-            "|---|---|---|---|",
+            f"- 任务总数：{len(summary.tasks)}；执行 "
+            f"{sum(item['status'] == 'executed' for item in summary.tasks)}；"
+            f"跳过 {sum(item['status'] == 'skipped' for item in summary.tasks)}；"
+            f"失败 {sum(item['status'] == 'failed' for item in summary.tasks)}",
+            f"- 完整审计日志：[{summary.run_id}](<运行日志/{log_name}>)",
+            "",
+            "### 需要关注的失败任务",
+            "",
+            "| 标的 | 任务 | 原因 |",
+            "|---|---|---|",
             *[
-                f"| {item['symbol']} | {item['task']} | {item['status']} | {item['reason']} |"
+                f"| {item['symbol']} | {item['task']} | {item['reason']} |"
                 for item in summary.tasks
+                if item["status"] == "failed"
             ],
+            "- 无失败任务。"
+            if not any(item["status"] == "failed" for item in summary.tasks)
+            else "",
             "",
             "## 使用方式",
             "",
-            "- 先读本页的重要结论，再按需打开个股或回测详细报告。",
+            "- 先读本页的重要结论，再按需打开个股或回测详细报告；任务明细见运行日志。",
             "- 任何动作仍需检查数据质量、回撤预算和失效条件；本系统不会自动下单。",
             "",
         ]
@@ -292,6 +305,29 @@ def _summary_decision(
     if not metrics:
         return action
     return f"{action}<br>评分 {metrics['score']:+.2f} / 置信 {metrics['confidence']:.0%}"
+
+
+def render_task_log(summary: AutomationSummary) -> str:
+    """Render verbose task details outside the human-facing summary page."""
+    lines = [
+        "---",
+        "type: automated-run-log",
+        f"date: {summary.as_of.isoformat()}",
+        f"run_id: {summary.run_id}",
+        "---",
+        "",
+        f"# 自动运行日志（{summary.as_of.isoformat()} / {summary.run_id}）",
+        "",
+        "| 标的 | 任务 | 状态 | 原因 |",
+        "|---|---|---|---|",
+        *[
+            f"| {item['symbol']} | {item['task']} | {item['status']} | {item['reason']} |"
+            for item in summary.tasks
+        ],
+        "",
+        f"- 成功标的：{len(summary.succeeded)}；失败标的：{len(summary.failed)}",
+    ]
+    return "\n".join(lines)
 
 
 def run_automation(
@@ -750,6 +786,12 @@ def run_automation(
             )
         except FileNotFoundError:
             LOGGER.info("没有持仓快照，跳过组合检查")
+        _write_report(
+            config,
+            f"{analysis_date.isoformat()}-{summary.run_id}.md",
+            render_task_log(summary),
+            Path("运行日志"),
+        )
         _write_report(config, "最新摘要.md", render_summary_markdown(config, summary))
         database.finish_automation_run(
             summary.run_id,
