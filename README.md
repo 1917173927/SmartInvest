@@ -30,6 +30,8 @@ uv run stock calibrate --symbol CN:601318 --horizon-days 20 --max-windows 100 --
 uv run stock auto
 # 临时关闭可选模型（不改配置，仍生成基线报告）
 uv run stock auto --no-chronos --no-llm
+# 需要调试时才输出完整任务 JSON
+uv run stock auto --verbose
 ```
 
 Chronos 默认模型为 `amazon/chronos-2`。首次实际运行会下载模型；若未安装、下载失败或被校准规则禁用，系统自动回退到随机游走与历史波动率基线。系统优先读取本地模型缓存；首次下载默认避开在部分个人网络中不稳定的 Xet 传输层。

@@ -298,6 +298,10 @@ def auto_command(
         bool | None,
         typer.Option("--chronos/--no-chronos", help="是否启用 Chronos；默认读取配置"),
     ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", help="输出完整任务 JSON；默认只显示重要摘要"),
+    ] = False,
 ) -> None:
     """无交互运行同步、分析、回执核对和组合检查。"""
     config = AppConfig.load()
@@ -306,7 +310,21 @@ def auto_command(
     except Exception as exc:
         console.print(f"[red]自动运行失败：{exc}[/red]")
         raise typer.Exit(1) from exc
-    console.print_json(summary_json(summary))
+    if verbose:
+        console.print_json(summary_json(summary))
+    else:
+        executed = sum(item["status"] == "executed" for item in summary.tasks)
+        skipped = sum(item["status"] == "skipped" for item in summary.tasks)
+        failed = sum(item["status"] == "failed" for item in summary.tasks)
+        console.print(
+            f"[green]自动分析完成[/green]：成功 {len(summary.succeeded)}，"
+            f"失败 {len(summary.failed)}；任务执行 {executed} / 跳过 {skipped} / 失败 {failed}"
+        )
+        console.print(f"摘要：{config.reports_dir / '最新摘要.md'}")
+        if summary.portfolio_report:
+            console.print(f"组合报告：{summary.portfolio_report}")
+        if summary.failed:
+            console.print("[yellow]失败标的：" + "；".join(summary.failed) + "[/yellow]")
     if summary.failed and not summary.succeeded:
         raise typer.Exit(1)
 
