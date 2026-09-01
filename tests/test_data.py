@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
+import pytest
 
 from stock_analysis.data import (
     AkShareProvider,
@@ -14,6 +16,7 @@ from stock_analysis.data import (
     Database,
     Instrument,
     Market,
+    YFinanceProvider,
     _normalize_provider_metric,
     coverage_warnings,
     quality_summary,
@@ -45,6 +48,61 @@ def test_provider_percentages_are_normalized() -> None:
     assert _normalize_provider_metric("dividend_yield", 4.83) == 0.0483
     assert _normalize_provider_metric("dividend_yield", 0.0483) == 0.0483
     assert _normalize_provider_metric("debt_to_equity", 120.0) == 1.2
+
+
+def test_yfinance_current_snapshot_is_not_backdated(tmp_path, monkeypatch) -> None:
+    class FakeTicker:
+        info = {"trailingPE": 20.0, "returnOnEquity": 0.15}
+
+    class FakeYFinance:
+        @staticmethod
+        def Ticker(_symbol):
+            return FakeTicker()
+
+    observed_at = datetime(2026, 9, 1, 4, 0, tzinfo=UTC)
+    monkeypatch.setitem(sys.modules, "yfinance", FakeYFinance())
+    monkeypatch.setattr(YFinanceProvider, "available", staticmethod(lambda: True))
+    monkeypatch.setattr("stock_analysis.data.utc_now", lambda: observed_at)
+
+    records = YFinanceProvider().fetch_fundamentals(Instrument.parse("US:AAPL"), date(2020, 1, 1))
+
+    assert records
+    assert {record.as_of for record in records} == {observed_at.date()}
+    with Database(tmp_path / "analysis.sqlite3") as database:
+        database.upsert_fundamentals(records)
+        assert database.latest_fundamentals("US:AAPL", date(2020, 1, 1)) == {}
+        assert set(database.latest_fundamentals("US:AAPL", observed_at.date())) == {"pe", "roe"}
+
+
+def test_database_initializes_schema_version_and_busy_timeout(tmp_path) -> None:
+    with Database(tmp_path / "analysis.sqlite3") as database:
+        timeout = database.connection.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert database.schema_version == 1
+        assert timeout == 30000
+
+
+def test_database_upgrades_unversioned_database_without_losing_tables(tmp_path) -> None:
+    path = tmp_path / "analysis.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE legacy_marker (value TEXT NOT NULL)")
+    connection.execute("INSERT INTO legacy_marker VALUES ('preserved')")
+    connection.commit()
+    connection.close()
+
+    with Database(path) as database:
+        marker = database.connection.execute("SELECT value FROM legacy_marker").fetchone()[0]
+        assert database.schema_version == 1
+        assert marker == "preserved"
+
+
+def test_database_rejects_newer_schema_version(tmp_path) -> None:
+    path = tmp_path / "analysis.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA user_version = 999")
+    connection.close()
+
+    with pytest.raises(RuntimeError, match="高于当前程序支持"):
+        Database(path)
 
 
 def test_akshare_uses_tencent_when_eastmoney_fails(monkeypatch) -> None:

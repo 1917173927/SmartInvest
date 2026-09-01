@@ -21,6 +21,8 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, Field, field_validator
 
+SCHEMA_VERSION = 1
+
 
 def utc_now() -> datetime:
     return datetime.now(tz=UTC)
@@ -270,11 +272,16 @@ class Database:
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(path)
+        self.connection = sqlite3.connect(path, timeout=30.0)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA journal_mode = WAL")
-        self._initialize()
+        self.connection.execute("PRAGMA busy_timeout = 30000")
+        try:
+            self._initialize()
+        except Exception:
+            self.connection.close()
+            raise
 
     def close(self) -> None:
         self.connection.close()
@@ -285,7 +292,17 @@ class Database:
     def __exit__(self, *_: object) -> None:
         self.close()
 
+    @property
+    def schema_version(self) -> int:
+        row = self.connection.execute("PRAGMA user_version").fetchone()
+        return int(row[0])
+
     def _initialize(self) -> None:
+        current_version = self.schema_version
+        if current_version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"数据库版本 {current_version} 高于当前程序支持的版本 {SCHEMA_VERSION}"
+            )
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS bars (
@@ -462,6 +479,8 @@ class Database:
                 "CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts "
                 "USING fts5(document_id UNINDEXED, symbol, title, body, tokenize='unicode61')"
             )
+        if current_version < SCHEMA_VERSION:
+            self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.connection.commit()
 
     def upsert_bars(self, bars: Sequence[Bar]) -> None:
@@ -1338,7 +1357,7 @@ class YFinanceProvider:
             )
         return results
 
-    def fetch_fundamentals(self, instrument: Instrument, as_of: date) -> list[FundamentalRecord]:
+    def fetch_fundamentals(self, instrument: Instrument, _as_of: date) -> list[FundamentalRecord]:
         if not self.available():
             return []
         import yfinance as yf
@@ -1357,6 +1376,10 @@ class YFinanceProvider:
             "eps": "trailingEps",
             "book_value_per_share": "bookValue",
         }
+        # ``Ticker.info`` is a current snapshot, not a historical point-in-time
+        # dataset.  Timestamp it with the observation date instead of the caller's
+        # requested historical cutoff so backtests cannot see future fundamentals.
+        observed_at = utc_now().date()
         records: list[FundamentalRecord] = []
         for metric, key in aliases.items():
             value = _number(info.get(key), math.nan)
@@ -1369,7 +1392,7 @@ class YFinanceProvider:
                     metric=metric,
                     value=value,
                     unit=instrument.currency if metric == "market_cap" else "ratio",
-                    as_of=as_of,
+                    as_of=observed_at,
                     source=self.name,
                     quality=DataQuality.B,
                 )
@@ -1565,6 +1588,12 @@ def sync_symbol(
             fundamental_records.extend(SecEdgarProvider().fetch_fundamentals(instrument, end))
         except Exception as exc:
             result.warnings.append(f"SEC 财务事实未同步: {exc}")
+    future_snapshots = [record for record in fundamental_records if record.as_of > end]
+    if future_snapshots:
+        sources = ", ".join(sorted({record.source for record in future_snapshots}))
+        result.warnings.append(
+            f"{sources} 仅提供当前基本面快照；已按实际观测日保存，不用于 {end} 的历史分析"
+        )
     database.upsert_fundamentals(fundamental_records)
     result.fundamentals = len(fundamental_records)
 
