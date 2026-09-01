@@ -833,43 +833,46 @@ def compute_staging_plan(
     )
     allocated_total_budget = total_capital * target_weight
 
-    supports = [z for z in price_zones if z.kind == "support" and z.center < current_price]
-    supports.sort(key=lambda z: z.center, reverse=True)
-    nearest_sup = supports[0] if supports else None
-    deeper_sup = supports[1] if len(supports) > 1 else None
-
     vr = valuation_range
     if vr.available and vr.buy_high and current_price > vr.buy_high:
         t1_price = round(vr.buy_high, 2)
-        t1_note = "现价高于买入线，挂单于安全边际买入上限建立底仓"
+        t1_note = f"现价高于买入线，挂单于估值安全边际买入上限 ({t1_price:.2f}) 建立底仓"
     else:
         t1_price = round(current_price, 2)
         t1_note = "现价处于合理/折价击球区，启动首笔跟踪底仓"
+
+    # 支撑位必须严格位于首笔买入价 t1_price 之下，形成递进阶梯
+    valid_supports = [z for z in price_zones if z.kind == "support" and z.high < t1_price]
+    valid_supports.sort(key=lambda z: z.center, reverse=True)
+    nearest_sup = valid_supports[0] if valid_supports else None
+    deeper_sup = valid_supports[1] if len(valid_supports) > 1 else None
 
     if nearest_sup:
         t2_price = round(nearest_sup.high, 2)
         t2_note = f"在近端强支撑区间上沿 ({nearest_sup.low:.2f}–{nearest_sup.high:.2f}) 挂单加仓"
     elif vr.available and vr.fair_low and vr.fair_low < t1_price:
         t2_price = round(vr.fair_low, 2)
-        t2_note = "在合理价值区间下沿挂单加仓"
+        t2_note = f"在合理价值区间下沿 ({vr.fair_low:.2f}) 挂单加仓"
     else:
-        t2_price = round(t1_price * 0.95, 2)
-        t2_note = "在首笔买点下方 -5% 处挂单加仓"
+        t2_price = round(t1_price * 0.96, 2)
+        t2_note = f"在首笔买点下方 -4% ({t2_price:.2f}) 挂单加仓"
 
-    if deeper_sup:
+    if deeper_sup and deeper_sup.high < t2_price:
         t3_price = round(deeper_sup.center, 2)
         t3_note = f"在次级纵深支撑带 ({deeper_sup.low:.2f}–{deeper_sup.high:.2f}) 挂单"
-    elif vr.available and vr.buy_low:
-        t3_price = round(min(vr.buy_low, t2_price * 0.96), 2)
-        t3_note = "在深度安全边际买入下沿挂单"
+    elif vr.available and vr.buy_low and vr.buy_low < t2_price:
+        t3_price = round(vr.buy_low, 2)
+        t3_note = f"在深度估值安全边际下沿 ({vr.buy_low:.2f}) 挂单"
     else:
         t3_price = round(t2_price * 0.95, 2)
-        t3_note = "在加仓买点下方 -5% 深度折价处挂单"
+        t3_note = f"在加仓买点下方 -5% 深度折价处 ({t3_price:.2f}) 挂单"
 
     if t2_price >= t1_price:
         t2_price = round(t1_price * 0.96, 2)
+        t2_note = f"在首笔买点下方 -4% ({t2_price:.2f}) 挂单加仓"
     if t3_price >= t2_price:
-        t3_price = round(t2_price * 0.96, 2)
+        t3_price = round(t2_price * 0.95, 2)
+        t3_note = f"在加仓买点下方 -5% 深度折价处 ({t3_price:.2f}) 挂单"
 
     tier_weights = [0.30, 0.40, 0.30]
     tier_prices = [t1_price, t2_price, t3_price]
@@ -902,7 +905,7 @@ def compute_staging_plan(
             )
         )
 
-    lowest_sup_floor = min((z.low for z in supports), default=t3_price * 0.93)
+    lowest_sup_floor = min((z.low for z in valid_supports), default=t3_price * 0.93)
     inval_price = round(min(lowest_sup_floor, t3_price * 0.94), 2)
     inval_note = f"连续两日有效收盘击穿 {inval_price:.2f} 或基本面恶化时止损/失效"
 

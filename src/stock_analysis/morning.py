@@ -191,6 +191,7 @@ def generate_morning_brief(
                 f"- **现价**：{it.current_price:.2f} {it.currency} | "
                 f"**角色**：{it.role} | **行业**：{it.sector} | "
                 f"**估值状态**：{it.valuation_status}",
+                "",
                 "| 批次 | 目标价 | 建议手数 | 建议股数 | 占用资金 | 券商下单类型 | 执行逻辑 |",
                 "|---|---:|---:|---:|---:|---|---|",
             ]
@@ -209,6 +210,7 @@ def generate_morning_brief(
                 f"**{lots} 手** | {tier.shares} 股 | {tier.allocated_amount:,.2f} | "
                 f"`{order_type}` | {tier.rationale} |"
             )
+        lines.append("")
 
         if it.plan.invalidation_price:
             lines.extend(
