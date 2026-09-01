@@ -33,9 +33,9 @@ from stock_analysis.decision import (
     analyze_package,
     create_receipts,
     latest_portfolio_snapshot,
-    position_weight,
     render_analysis_markdown,
     render_portfolio_markdown,
+    resolve_holding_context,
 )
 from stock_analysis.files import atomic_write_text
 from stock_analysis.forecast import (
@@ -688,11 +688,14 @@ def run_automation(
                     )
                     for days in SHORT_HORIZONS + MEDIUM_HORIZONS
                 ]
-                try:
-                    snapshot = latest_portfolio_snapshot(config)
-                    current_weight = position_weight(snapshot, symbol)
-                except Exception:
-                    current_weight = None
+                current_shares, total_assets, holding_source = resolve_holding_context(
+                    config, symbol
+                )
+                current_weight = (
+                    current_shares * float(frame.iloc[-1]["close"]) / total_assets
+                    if current_shares is not None and total_assets
+                    else None
+                )
                 package = analyze_package(
                     config=config,
                     database=database,
@@ -708,6 +711,9 @@ def run_automation(
                     forecasts=forecasts,
                     research=research,
                     current_weight=current_weight,
+                    current_shares=current_shares,
+                    total_assets=total_assets,
+                    holding_source=holding_source,
                 )
                 safe_symbol = symbol.replace(":", "-").replace("/", "-")
                 chart_config = config.section("charts")

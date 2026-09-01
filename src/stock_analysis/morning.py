@@ -19,9 +19,12 @@ from stock_analysis.data import (
 )
 from stock_analysis.decision import (
     AnalysisPackage,
+    ExitStatus,
     StagingPlan,
     analyze_package,
     compute_staging_plan,
+    latest_portfolio_snapshot,
+    resolve_holding_context,
 )
 from stock_analysis.files import atomic_write_text
 from stock_analysis.indicators import macro_assessments
@@ -59,12 +62,20 @@ class MorningBrief:
 def generate_morning_brief(
     config: AppConfig,
     *,
-    total_capital: float = 100000.0,
+    total_capital: float | None = None,
     as_of: date | None = None,
     send_notification: bool = True,
 ) -> MorningBrief:
     """Generate a high-conviction pre-market action briefing for 09:15 order placement."""
     today = as_of or date.today()
+    if total_capital is None:
+        try:
+            total_capital = latest_portfolio_snapshot(config).total_cny_assets
+        except (FileNotFoundError, OSError, ValueError):
+            total_capital = None
+    if total_capital is None:
+        raw_capital = config.section("portfolio").get("cn_account_assets", 100000.0)
+        total_capital = float(raw_capital)
     database = Database(config.db_path)
     brief = MorningBrief(as_of=today, total_capital=total_capital)
 
@@ -103,6 +114,17 @@ def generate_morning_brief(
             as_of=today,
             use_llm=False,
         )
+        current_shares, configured_assets, holding_source = resolve_holding_context(
+            config, canonical
+        )
+        account_assets = (
+            total_capital if canonical.startswith(("CN:", "CNFUND:")) else configured_assets
+        )
+        current_weight = (
+            current_shares * current_price / account_assets
+            if current_shares is not None and account_assets
+            else None
+        )
         pkg = analyze_package(
             config=config,
             database=database,
@@ -113,22 +135,33 @@ def generate_morning_brief(
             data_warnings=[],
             forecasts=[],
             research=research,
+            current_weight=current_weight,
+            current_shares=current_shares,
+            total_assets=account_assets,
+            holding_source=holding_source,
         )
 
         assigned_weight = pkg.decisions[0].target_position if pkg.decisions else None
-        plan = compute_staging_plan(
+        plan = pkg.staging_plan or compute_staging_plan(
             current_price=current_price,
             valuation_range=pkg.valuation_range,
             price_zones=pkg.price_zones,
             role=role,
-            total_capital=total_capital,
+            total_capital=account_assets or total_capital,
             target_position=assigned_weight,
+            existing_position_value=(current_shares or 0) * current_price,
         )
 
         vr = pkg.valuation_range
         dist_to_buy = (current_price / vr.buy_high - 1) if (vr.available and vr.buy_high) else None
 
-        if vr.available and vr.buy_high and current_price <= vr.buy_high:
+        if pkg.exit_plan and pkg.exit_plan.status in {ExitStatus.REDUCE, ExitStatus.EXIT}:
+            val_status = "🔴 已触发仓位/退出纪律"
+            priority = "🛑 优先减仓/退出复核"
+        elif pkg.exit_plan and pkg.exit_plan.status is ExitStatus.REVIEW:
+            val_status = "🟠 失效条件待复核"
+            priority = "🛑 暂停买入"
+        elif vr.available and vr.buy_high and current_price <= vr.buy_high:
             val_status = "🟢 进入安全买入区"
             priority = "🔥 优先建仓"
         elif vr.available and vr.fair_low and current_price <= vr.fair_low:
@@ -159,7 +192,15 @@ def generate_morning_brief(
 
     # Sort items by priority: Priority first, then distance to buy
     def _sort_key(item: MorningItem) -> tuple[int, float]:
-        rank = 0 if "优先" in item.priority else 1 if "观察" in item.priority else 2
+        rank = (
+            0
+            if "减仓" in item.priority or "暂停" in item.priority
+            else 1
+            if "优先" in item.priority
+            else 2
+            if "观察" in item.priority
+            else 3
+        )
         dist = item.dist_to_buy if item.dist_to_buy is not None else 999.0
         return (rank, dist)
 
@@ -192,6 +233,32 @@ def generate_morning_brief(
                 f"- **现价**：{it.current_price:.2f} {it.currency} | "
                 f"**角色**：{it.role} | **行业**：{it.sector} | "
                 f"**估值状态**：{it.valuation_status}",
+            ]
+        )
+        exit_plan = it.package.exit_plan
+        if exit_plan and exit_plan.status in {
+            ExitStatus.REVIEW,
+            ExitStatus.REDUCE,
+            ExitStatus.EXIT,
+        }:
+            lines.extend(
+                [
+                    "",
+                    f"> [!danger] **当前动作：{exit_plan.action}**",
+                    f"> - 当前仓位：{exit_plan.current_weight:.2%}；"
+                    f"卖出后目标：{exit_plan.target_weight:.2%}",
+                    f"> - 建议卖出：**{exit_plan.sell_shares} 股**；"
+                    f"预计剩余：**{exit_plan.target_shares} 股**；"
+                    f"参考回笼：{exit_plan.estimated_proceeds:,.2f} {it.currency}",
+                    f"> - 持仓口径：{exit_plan.holding_source}",
+                ]
+            )
+            for reason in exit_plan.reasons:
+                lines.append(f"> - 触发依据：{reason}")
+            lines.extend(["> - 不生成或保留任何买入挂单。", ""])
+            continue
+        lines.extend(
+            [
                 "",
                 "| 批次 | 目标价 | 建议手数 | 建议股数 | 占用资金 | 券商下单类型 | 执行逻辑 |",
                 "|---|---:|---:|---:|---:|---|---|",

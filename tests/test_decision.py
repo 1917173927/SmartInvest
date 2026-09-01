@@ -4,9 +4,13 @@ from datetime import date
 
 from stock_analysis.data import AppConfig, Database, DataQuality, FundamentalRecord
 from stock_analysis.decision import (
+    ExitStatus,
+    Horizon,
+    HorizonDecision,
     MetricAssessment,
     ValuationRange,
     build_decisions,
+    compute_exit_plan,
     latest_portfolio_snapshot,
     valuation_range,
 )
@@ -56,7 +60,7 @@ date: 2026-08-27
 | 中国平安 | 300 / 300 股 | 54 | 55 | 16500 |
 
 ## 人民币资产视图
-已记录人民币资产暂为 **75,000.00 元**：
+已记录人民币资产暂为 **75,000.00** 元：
 | 类别 | 金额（CNY） | 占比 |
 |---|---:|---:|
 | 现金管理 | 20,000.00 | 26.7% |
@@ -80,6 +84,81 @@ date: 2026-08-27
     assert snapshot.cash_cny == 20000
     assert snapshot.positions[0].symbol == "CN:601318"
     assert snapshot.positions[0].role == "core"
+
+
+def _exit_decision(action: str, target: float | None) -> HorizonDecision:
+    return HorizonDecision(
+        horizon=Horizon.MEDIUM,
+        score=-0.5,
+        confidence=0.8,
+        action=action,
+        rationale="fixture",
+        target_position=target,
+    )
+
+
+def test_exit_plan_reduces_overweight_a_share_by_board_lot(tmp_path) -> None:
+    config = AppConfig(
+        tmp_path,
+        {
+            "risk": {"core_position_limit": 0.35},
+            "assets": {"CN:601318": {"name": "中国平安", "role": "core"}},
+        },
+    )
+    plan = compute_exit_plan(
+        config=config,
+        symbol="CN:601318",
+        current_price=50,
+        decisions=[_exit_decision("停止加仓；复核减仓", 0.35)],
+        current_shares=1000,
+        total_assets=100000,
+        current_weight=0.50,
+    )
+    assert plan.status is ExitStatus.REDUCE
+    assert plan.sell_shares == 300
+    assert plan.target_shares == 700
+    assert plan.target_weight == 0.35
+
+
+def test_exit_plan_uses_negative_signal_reduction_target(tmp_path) -> None:
+    config = AppConfig(
+        tmp_path,
+        {
+            "risk": {"core_position_limit": 0.35},
+            "assets": {"CN:601318": {"name": "中国平安", "role": "core"}},
+        },
+    )
+    plan = compute_exit_plan(
+        config=config,
+        symbol="CN:601318",
+        current_price=50,
+        decisions=[_exit_decision("减仓/回避", 0.10)],
+        current_shares=400,
+        total_assets=100000,
+        current_weight=0.20,
+    )
+    assert plan.status is ExitStatus.REDUCE
+    assert plan.sell_shares == 200
+    assert plan.target_shares == 200
+    assert plan.target_weight == 0.10
+
+
+def test_exit_plan_full_exit_can_sell_odd_lot(tmp_path) -> None:
+    config = AppConfig(
+        tmp_path,
+        {"assets": {"CN:601318": {"name": "中国平安", "role": "core"}}},
+    )
+    plan = compute_exit_plan(
+        config=config,
+        symbol="CN:601318",
+        current_price=50,
+        decisions=[_exit_decision("回避/重审退出", 0.0)],
+        current_shares=350,
+        total_assets=100000,
+    )
+    assert plan.status is ExitStatus.EXIT
+    assert plan.sell_shares == 350
+    assert plan.target_shares == 0
 
 
 def test_database_accepts_official_fundamental_quality(tmp_path) -> None:

@@ -90,6 +90,31 @@ class StagingPlan(BaseModel):
     invalidation_note: str = ""
 
 
+class ExitStatus(StrEnum):
+    UNAVAILABLE = "数据不足"
+    HOLD = "无需减仓"
+    REVIEW = "暂停买入并复核"
+    REDUCE = "减仓"
+    EXIT = "退出"
+
+
+class ExitPlan(BaseModel):
+    status: ExitStatus = ExitStatus.UNAVAILABLE
+    action: str = "持仓数据不足，无法计算减仓数量"
+    current_weight: float | None = None
+    target_weight: float | None = None
+    current_shares: int | None = None
+    target_shares: int | None = None
+    sell_shares: int = 0
+    reference_price: float | None = None
+    estimated_proceeds: float = 0.0
+    total_assets: float | None = None
+    holding_source: str = "未提供"
+    reasons: list[str] = Field(default_factory=list)
+    trigger_conditions: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class AnalysisPackage(BaseModel):
     symbol: str
     name: str
@@ -112,6 +137,7 @@ class AnalysisPackage(BaseModel):
     price_zones: list[PriceZone] = Field(default_factory=list)
     price_zone_validation: list[PriceZoneValidation] = Field(default_factory=list)
     staging_plan: StagingPlan | None = None
+    exit_plan: ExitPlan | None = None
 
 
 class PortfolioPosition(BaseModel):
@@ -788,7 +814,15 @@ def build_decisions(
                 )
                 staging = "三批 40%/30%/30%；每批前重新检查估值、事件与组合上限"
         elif current_weight is not None:
-            target_position = min(current_weight, position_limit)
+            if action.startswith("回避"):
+                target_position = 0.0
+            elif action == "减仓/回避":
+                reduction_fraction = float(risk.get("reduction_target_fraction", 0.50))
+                target_position = min(position_limit, current_weight * reduction_fraction)
+            elif "复核减仓" in action:
+                target_position = position_limit
+            else:
+                target_position = current_weight
         rationale = (
             f"预测={_forecast_score(forecast):+.2f}，确定性规则={deterministic_score:+.2f}，"
             f"宏观={macro_score:+.2f}，新闻证据={llm_score:+.2f}；综合={score:+.2f}。"
@@ -926,6 +960,159 @@ def compute_staging_plan(
     )
 
 
+def compute_exit_plan(
+    *,
+    config: AppConfig,
+    symbol: str,
+    current_price: float,
+    decisions: list[HorizonDecision],
+    current_shares: int | None,
+    total_assets: float | None,
+    current_weight: float | None = None,
+    invalidation_price: float | None = None,
+    target_weight_override: float | None = None,
+    holding_source: str = "未提供",
+) -> ExitPlan:
+    """Build a deterministic reduce/exit plan without placing an order."""
+    warnings = ["执行前须在券商端复核实时报价、可卖数量、已挂委托和成交回报"]
+    triggers = list(
+        dict.fromkeys(
+            condition for decision in decisions for condition in decision.invalidation_conditions
+        )
+    )
+    if current_shares is None or total_assets is None or total_assets <= 0:
+        warnings.append("请更新最新持仓快照，或配置账户总资产与 current_shares")
+        return ExitPlan(
+            current_weight=current_weight,
+            current_shares=current_shares,
+            reference_price=current_price if current_price > 0 else None,
+            total_assets=total_assets,
+            holding_source=holding_source,
+            trigger_conditions=triggers,
+            warnings=warnings,
+        )
+    if current_shares < 0 or current_price <= 0:
+        warnings.append("持股数或参考价格无效")
+        return ExitPlan(
+            current_weight=current_weight,
+            current_shares=current_shares,
+            reference_price=current_price if current_price > 0 else None,
+            total_assets=total_assets,
+            holding_source=holding_source,
+            trigger_conditions=triggers,
+            warnings=warnings,
+        )
+
+    calculated_weight = current_shares * current_price / total_assets
+    current_weight = calculated_weight if current_weight is None else current_weight
+    if current_shares == 0:
+        return ExitPlan(
+            status=ExitStatus.HOLD,
+            action="当前无持仓，无需卖出",
+            current_weight=0.0,
+            target_weight=0.0,
+            current_shares=0,
+            target_shares=0,
+            reference_price=current_price,
+            total_assets=total_assets,
+            holding_source=holding_source,
+            trigger_conditions=triggers,
+            warnings=warnings,
+        )
+
+    profile = config.asset(symbol)
+    role = str(profile.get("role", "satellite"))
+    risk = config.section("risk")
+    position_limit = float(
+        risk.get("core_position_limit", 0.35)
+        if role == "core"
+        else risk.get("satellite_position_limit", 0.15)
+    )
+    full_exit = [item for item in decisions if item.action.startswith("回避")]
+    reductions = [item for item in decisions if "减仓" in item.action]
+    reasons: list[str] = []
+    target_weight = current_weight
+    status = ExitStatus.HOLD
+    action = "维持现有仓位；未触发减仓或退出条件"
+
+    if full_exit:
+        status = ExitStatus.EXIT
+        target_weight = 0.0
+        action = "退出持仓；取消未成交买单"
+        reasons.extend(f"{HORIZON_LABELS[item.horizon]}：{item.action}" for item in full_exit)
+    elif target_weight_override is not None and target_weight_override < current_weight:
+        status = ExitStatus.REDUCE
+        target_weight = max(0.0, target_weight_override)
+        action = "减仓至用户指定目标；取消未成交买单"
+        reasons.append(f"当前仓位 {current_weight:.2%} 高于指定目标 {target_weight:.2%}")
+    elif reductions or current_weight > position_limit:
+        status = ExitStatus.REDUCE
+        decision_targets = [
+            item.target_position
+            for item in reductions
+            if item.target_position is not None and item.target_position < current_weight
+        ]
+        target_weight = min(decision_targets or [position_limit])
+        action = "减仓至纪律目标；取消未成交买单"
+        if current_weight > position_limit:
+            reasons.append(
+                f"当前仓位 {current_weight:.2%} 超过 {role} 角色上限 {position_limit:.2%}"
+            )
+        reasons.extend(f"{HORIZON_LABELS[item.horizon]}：{item.action}" for item in reductions)
+    elif invalidation_price is not None and current_price < invalidation_price:
+        status = ExitStatus.REVIEW
+        action = "暂停买入并复核失效条件；单次跌破不自动卖出"
+        reasons.append(f"参考价 {current_price:.2f} 已低于失效线 {invalidation_price:.2f}")
+
+    if status in {ExitStatus.HOLD, ExitStatus.REVIEW}:
+        return ExitPlan(
+            status=status,
+            action=action,
+            current_weight=current_weight,
+            target_weight=current_weight,
+            current_shares=current_shares,
+            target_shares=current_shares,
+            reference_price=current_price,
+            total_assets=total_assets,
+            holding_source=holding_source,
+            reasons=list(dict.fromkeys(reasons)),
+            trigger_conditions=triggers,
+            warnings=warnings,
+        )
+
+    if status is ExitStatus.EXIT or target_weight <= 0:
+        target_shares = 0
+        sell_shares = current_shares
+    else:
+        raw_target_shares = max(0, math.floor(total_assets * target_weight / current_price))
+        if symbol.startswith("CN:"):
+            target_shares = (raw_target_shares // 100) * 100
+        else:
+            target_shares = raw_target_shares
+        target_shares = min(current_shares, target_shares)
+        sell_shares = current_shares - target_shares
+        if symbol.startswith("CN:") and 0 < sell_shares < current_shares:
+            sell_shares = min(current_shares, math.ceil(sell_shares / 100) * 100)
+            target_shares = current_shares - sell_shares
+    actual_target_weight = target_shares * current_price / total_assets
+    return ExitPlan(
+        status=status,
+        action=action,
+        current_weight=current_weight,
+        target_weight=actual_target_weight,
+        current_shares=current_shares,
+        target_shares=target_shares,
+        sell_shares=sell_shares,
+        reference_price=current_price,
+        estimated_proceeds=sell_shares * current_price,
+        total_assets=total_assets,
+        holding_source=holding_source,
+        reasons=list(dict.fromkeys(reasons)),
+        trigger_conditions=triggers,
+        warnings=warnings,
+    )
+
+
 def analyze_package(
     *,
     config: AppConfig,
@@ -938,6 +1125,10 @@ def analyze_package(
     forecasts: list[ForecastBundle],
     research: ResearchResult,
     current_weight: float | None = None,
+    current_shares: int | None = None,
+    total_assets: float | None = None,
+    target_weight_override: float | None = None,
+    holding_source: str = "未提供",
     fair_value_low: float | None = None,
     fair_value_high: float | None = None,
 ) -> AnalysisPackage:
@@ -1026,8 +1217,24 @@ def analyze_package(
         valuation_range=value_range,
         price_zones=price_zones,
         role=str(profile.get("role", "satellite")),
+        total_capital=total_assets or 100000.0,
         target_position=decisions[0].target_position if decisions else None,
+        existing_position_value=(current_shares or 0) * price,
     )
+    exit_plan = compute_exit_plan(
+        config=config,
+        symbol=symbol,
+        current_price=price,
+        decisions=decisions,
+        current_shares=current_shares,
+        total_assets=total_assets,
+        current_weight=current_weight,
+        invalidation_price=staging_plan.invalidation_price,
+        target_weight_override=target_weight_override,
+        holding_source=holding_source,
+    )
+    if exit_plan.status in {ExitStatus.REVIEW, ExitStatus.REDUCE, ExitStatus.EXIT}:
+        staging_plan.available = False
     return AnalysisPackage(
         symbol=symbol,
         name=str(profile.get("name", symbol)),
@@ -1048,6 +1255,7 @@ def analyze_package(
         price_zones=price_zones,
         price_zone_validation=price_zone_validation,
         staging_plan=staging_plan,
+        exit_plan=exit_plan,
     )
 
 
@@ -1123,7 +1331,7 @@ def latest_portfolio_snapshot(config: AppConfig) -> PortfolioSnapshot:
         if date_match
         else date.fromisoformat(path.name[:10])
     )
-    total_match = re.search(r"已记录人民币资产暂为\s*\*\*([\d,.]+)\s*元", text)
+    total_match = re.search(r"已记录人民币资产暂为\s*\*\*([\d,.]+)(?:\*\*)?\s*元", text)
     total_assets = _parse_number(total_match.group(1)) if total_match else None
     positions: list[PortfolioPosition] = []
     section_match = re.search(r"## A 股明细\n(.*?)(?=\n## )", text, flags=re.DOTALL)
@@ -1180,6 +1388,54 @@ def position_weight(snapshot: PortfolioSnapshot, symbol: str) -> float | None:
         if item.symbol == symbol:
             return item.market_value / snapshot.total_cny_assets
     return 0.0
+
+
+def position_for_symbol(snapshot: PortfolioSnapshot, symbol: str) -> PortfolioPosition | None:
+    return next((item for item in snapshot.positions if item.symbol == symbol), None)
+
+
+def resolve_holding_context(config: AppConfig, symbol: str) -> tuple[int | None, float | None, str]:
+    """Resolve holdings from the newest snapshot, then fall back to local config."""
+    try:
+        snapshot = latest_portfolio_snapshot(config)
+        if snapshot.total_cny_assets and symbol.startswith(("CN:", "CNFUND:")):
+            position = position_for_symbol(snapshot, symbol)
+            if position:
+                shares = int(position.quantity)
+            elif symbol.startswith("CN:"):
+                shares = 0
+            else:
+                configured_shares = config.asset(symbol).get("current_shares")
+                shares = int(configured_shares) if configured_shares is not None else None
+            return (
+                shares,
+                snapshot.total_cny_assets,
+                f"持仓快照 {snapshot.path.name}（{snapshot.as_of.isoformat()}）",
+            )
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+
+    profile = config.asset(symbol)
+    configured_shares = profile.get("current_shares")
+    try:
+        shares = int(configured_shares) if configured_shares is not None else None
+    except (TypeError, ValueError):
+        shares = None
+    market = symbol.split(":", 1)[0]
+    key = {
+        "CN": "cn_account_assets",
+        "CNFUND": "cn_account_assets",
+        "HK": "hk_account_assets",
+        "US": "us_account_assets",
+    }.get(market)
+    portfolio = config.section("portfolio")
+    raw_assets = portfolio.get(key) if key else None
+    try:
+        total_assets = float(raw_assets) if raw_assets is not None else None
+    except (TypeError, ValueError):
+        total_assets = None
+    as_of = portfolio.get(f"{key}_as_of", "日期未注明") if key else "日期未注明"
+    return shares, total_assets, f"配置 current_shares / portfolio.{key}（截至 {as_of}）"
 
 
 def render_portfolio_markdown(

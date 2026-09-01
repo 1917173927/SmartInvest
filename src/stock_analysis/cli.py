@@ -48,17 +48,19 @@ from stock_analysis.data import (
 from stock_analysis.decision import (
     HORIZON_LABELS,
     AnalysisPackage,
+    ExitStatus,
     Horizon,
     HorizonDecision,
     StagingPlan,
     analyze_package,
+    compute_exit_plan,
     compute_staging_plan,
     create_receipts,
     get_valuation_strategy,
     latest_portfolio_snapshot,
-    position_weight,
     render_analysis_markdown,
     render_portfolio_markdown,
+    resolve_holding_context,
 )
 from stock_analysis.files import atomic_write_text
 from stock_analysis.forecast import (
@@ -237,6 +239,17 @@ def _resolve_size_capital(
         if override <= 0:
             raise typer.BadParameter("--capital 必须大于 0")
         return override, "命令行临时覆盖"
+
+    if instrument.market.value in {"CN", "CNFUND"}:
+        try:
+            snapshot = latest_portfolio_snapshot(config)
+            if snapshot.total_cny_assets and snapshot.total_cny_assets > 0:
+                return (
+                    snapshot.total_cny_assets,
+                    f"持仓快照 {snapshot.path.name}（{snapshot.as_of.isoformat()}）",
+                )
+        except (FileNotFoundError, OSError, ValueError):
+            pass
 
     portfolio = config.section("portfolio")
     key = {
@@ -730,11 +743,12 @@ def analyze_command(
         )
         for days in requested_horizons
     ]
-    try:
-        snapshot = latest_portfolio_snapshot(config)
-        current_weight = position_weight(snapshot, canonical)
-    except Exception:
-        current_weight = None
+    current_shares, total_assets, holding_source = resolve_holding_context(config, canonical)
+    current_weight = (
+        current_shares * float(frame.iloc[-1]["close"]) / total_assets
+        if current_shares is not None and total_assets
+        else None
+    )
     package = analyze_package(
         config=config,
         database=database,
@@ -746,6 +760,9 @@ def analyze_command(
         forecasts=forecasts,
         research=research,
         current_weight=current_weight,
+        current_shares=current_shares,
+        total_assets=total_assets,
+        holding_source=holding_source,
         fair_value_low=fair_value_low,
         fair_value_high=fair_value_high,
     )
@@ -1286,6 +1303,12 @@ def dash_command() -> None:
             as_of=date.today(),
             use_llm=False,
         )
+        current_shares, total_assets, holding_source = resolve_holding_context(config, canonical)
+        current_weight = (
+            current_shares * float(frame.iloc[-1]["close"]) / total_assets
+            if current_shares is not None and total_assets
+            else None
+        )
         package = analyze_package(
             config=config,
             database=database,
@@ -1296,6 +1319,10 @@ def dash_command() -> None:
             data_warnings=[],
             forecasts=[],
             research=research,
+            current_weight=current_weight,
+            current_shares=current_shares,
+            total_assets=total_assets,
+            holding_source=holding_source,
         )
 
         decisions_by_horizon = {d.horizon.value: d for d in package.decisions}
@@ -1321,6 +1348,14 @@ def dash_command() -> None:
         warnings_txt = "正常"
         if quality is DataQuality.C:
             warnings_txt = "[red]数据质量C级[/red]"
+        elif package.exit_plan and package.exit_plan.status in {
+            ExitStatus.REDUCE,
+            ExitStatus.EXIT,
+        }:
+            warnings_txt = (
+                f"[bold red]{package.exit_plan.status.value} "
+                f"{package.exit_plan.sell_shares} 股[/bold red]"
+            )
         elif vr.available and vr.buy_high and current_price <= vr.buy_high:
             warnings_txt = "[bold green]进入安全买入区[/bold green]"
 
@@ -1352,7 +1387,7 @@ def size_command(
     ] = None,
     held_shares: Annotated[
         int | None,
-        typer.Option(help="临时覆盖配置中的当前持股数；不传则读取资产的 current_shares"),
+        typer.Option(help="临时覆盖当前持股数；默认读取最新持仓快照或 current_shares"),
     ] = None,
     target_weight: Annotated[
         float | None, typer.Option(help="自定义目标仓位上限（如 0.15 表示 15%）")
@@ -1361,7 +1396,7 @@ def size_command(
         float, typer.Option(help="单笔交易最大承受风险比例（如 0.02 表示 2%）")
     ] = 0.02,
 ) -> None:
-    """实盘仓位测算与阶梯挂单生成器：根据账户资产与风险预算，精确计算三档买点股数与止损线。"""
+    """实盘仓位测算器：按实时价输出买入、减仓或退出计划。"""
     config, database = _context()
     instrument = Instrument.parse(symbol)
     canonical = instrument.canonical
@@ -1369,7 +1404,12 @@ def size_command(
     name = str(profile.get("name", canonical))
     role = str(profile.get("role", "satellite"))
     resolved_capital, capital_source = _resolve_size_capital(config, instrument, capital)
-    configured_shares = profile.get("current_shares", 0) if held_shares is None else held_shares
+    resolved_shares, _, holding_source = resolve_holding_context(config, canonical)
+    configured_shares = (
+        resolved_shares if held_shares is None and resolved_shares is not None else held_shares
+    )
+    if configured_shares is None:
+        configured_shares = profile.get("current_shares", 0)
     try:
         current_shares = int(configured_shares)
     except (TypeError, ValueError) as exc:
@@ -1431,6 +1471,13 @@ def size_command(
         data_warnings=[],
         forecasts=[],
         research=research,
+        current_weight=current_shares * reference_price / resolved_capital,
+        current_shares=current_shares,
+        total_assets=resolved_capital,
+        target_weight_override=target_weight,
+        holding_source=(
+            "命令行临时覆盖" if held_shares is not None or capital is not None else holding_source
+        ),
     )
 
     assigned_weight = (
@@ -1438,11 +1485,28 @@ def size_command(
         if target_weight is not None
         else (package.decisions[0].target_position if package.decisions else None)
     )
-    target_weight = (
+    resolved_target_weight = (
         assigned_weight if assigned_weight is not None else (0.20 if role == "core" else 0.10)
     )
     current_position_value = current_shares * current_price
     current_weight = current_position_value / resolved_capital
+
+    package.exit_plan = compute_exit_plan(
+        config=config,
+        symbol=canonical,
+        current_price=current_price,
+        decisions=package.decisions,
+        current_shares=current_shares,
+        total_assets=resolved_capital,
+        current_weight=current_weight,
+        invalidation_price=(
+            package.staging_plan.invalidation_price if package.staging_plan else None
+        ),
+        target_weight_override=target_weight,
+        holding_source=(
+            "命令行临时覆盖" if held_shares is not None or capital is not None else holding_source
+        ),
+    )
 
     plan = compute_staging_plan(
         current_price=reference_price,
@@ -1455,7 +1519,7 @@ def size_command(
         existing_position_value=current_position_value,
     )
 
-    console.print(f"\n[bold cyan]🎯 实盘阶梯建仓测算：{name} ({canonical})[/bold cyan]")
+    console.print(f"\n[bold cyan]🎯 实盘仓位与交易纪律测算：{name} ({canonical})[/bold cyan]")
     allocated_cap = resolved_capital * plan.total_target_weight
     console.print(
         f"盘中执行价: [bold]{current_price:.2f} {currency}[/bold] | "
@@ -1467,56 +1531,89 @@ def size_command(
         f"([dim]{capital_source}[/dim]) | "
         f"目标上限: [bold]{plan.total_target_weight:.0%}[/bold] ({allocated_cap:,.2f} {currency})"
     )
+    remaining_target_amount = max(
+        0.0, resolved_capital * resolved_target_weight - current_position_value
+    )
     console.print(
         f"当前持仓: [bold]{current_shares} 股[/bold]，按执行价计 "
         f"[bold]{current_position_value:,.2f} {currency}[/bold]，约占账户 "
         f"[bold]{current_weight:.2%}[/bold]；剩余目标额度 "
-        f"[bold]{max(0.0, resolved_capital * target_weight - current_position_value):,.2f} "
+        f"[bold]{remaining_target_amount:,.2f} "
         f"{currency}[/bold]"
     )
     for warning in quote_warnings:
         console.print(f"[yellow]报价提示：{warning}[/yellow]")
 
-    table = Table(title="阶梯挂单执行计划 (Staging Execution Plan)")
-    table.add_column("批次", style="bold")
-    table.add_column("挂单/触发价", justify="right")
-    table.add_column("配比", justify="center")
-    table.add_column("建议股数", justify="right")
-    table.add_column("建议手数", justify="right")
-    table.add_column("占用资金", justify="right")
-    table.add_column("执行逻辑与依据")
-
-    for tier in plan.tiers:
-        lots = tier.shares // 100
-        table.add_row(
-            tier.tier_name,
-            f"{tier.target_price:.2f} {currency}",
-            f"{tier.weight_pct:.0%}",
-            f"{tier.shares} 股",
-            f"{lots} 手" if lots > 0 else "不足1手",
-            f"{tier.allocated_amount:,.2f} {currency}",
-            (
-                tier.rationale
-                if tier.shares > 0
-                else "当前剩余目标额度不足或仓位已达上限；本档不下单"
-            ),
-        )
-
-    console.print(table)
-    console.print(
-        _execution_guidance(
-            current_price,
-            plan,
-            quote_actionable,
-            current_weight=current_weight,
-        )
+    exit_plan = package.exit_plan
+    exit_active = bool(
+        exit_plan and exit_plan.status in {ExitStatus.REVIEW, ExitStatus.REDUCE, ExitStatus.EXIT}
     )
+    if exit_active and exit_plan:
+        exit_table = Table(title="减仓与退出执行计划 (Reduce / Exit Plan)")
+        exit_table.add_column("状态", style="bold red")
+        exit_table.add_column("当前仓位", justify="right")
+        exit_table.add_column("目标仓位", justify="right")
+        exit_table.add_column("建议卖出", justify="right")
+        exit_table.add_column("卖出后持股", justify="right")
+        exit_table.add_column("参考回笼资金", justify="right")
+        exit_table.add_row(
+            exit_plan.status.value,
+            f"{exit_plan.current_weight:.2%}" if exit_plan.current_weight is not None else "—",
+            f"{exit_plan.target_weight:.2%}" if exit_plan.target_weight is not None else "—",
+            f"{exit_plan.sell_shares} 股",
+            f"{exit_plan.target_shares} 股",
+            f"{exit_plan.estimated_proceeds:,.2f} {currency}",
+        )
+        console.print(exit_table)
+        console.print(
+            f"[bold red]当前动作：{exit_plan.action}；建议卖出 "
+            f"{exit_plan.sell_shares} 股，卖出后持有 {exit_plan.target_shares} 股。[/bold red]"
+        )
+        for reason in exit_plan.reasons:
+            console.print(f"- 触发依据：{reason}")
+        if not quote_actionable:
+            console.print("[bold red]执行状态：暂停下单；当前价格不是可验证的实时行情。[/bold red]")
+    else:
+        table = Table(title="阶梯挂单执行计划 (Staging Execution Plan)")
+        table.add_column("批次", style="bold")
+        table.add_column("挂单/触发价", justify="right")
+        table.add_column("配比", justify="center")
+        table.add_column("建议股数", justify="right")
+        table.add_column("建议手数", justify="right")
+        table.add_column("占用资金", justify="right")
+        table.add_column("执行逻辑与依据")
+
+        for tier in plan.tiers:
+            lots = tier.shares // 100
+            table.add_row(
+                tier.tier_name,
+                f"{tier.target_price:.2f} {currency}",
+                f"{tier.weight_pct:.0%}",
+                f"{tier.shares} 股",
+                f"{lots} 手" if lots > 0 else "不足1手",
+                f"{tier.allocated_amount:,.2f} {currency}",
+                (
+                    tier.rationale
+                    if tier.shares > 0
+                    else "当前剩余目标额度不足或仓位已达上限；本档不下单"
+                ),
+            )
+
+        console.print(table)
+        console.print(
+            _execution_guidance(
+                current_price,
+                plan,
+                quote_actionable,
+                current_weight=current_weight,
+            )
+        )
     console.print(
         "[dim]下单前必须以券商盘口复核价格、可用资金、已成交数量和当前总仓位；"
         "本工具输出是条件计划，不是收益承诺。[/dim]"
     )
 
-    if plan.invalidation_price:
+    if plan.invalidation_price and not exit_active:
         max_loss = max(
             0.0,
             sum(
@@ -1571,6 +1668,12 @@ def compare_command(
             as_of=date.today(),
             use_llm=False,
         )
+        current_shares, total_assets, holding_source = resolve_holding_context(config, canonical)
+        current_weight = (
+            current_shares * float(frame.iloc[-1]["close"]) / total_assets
+            if current_shares is not None and total_assets
+            else None
+        )
         pkg = analyze_package(
             config=config,
             database=database,
@@ -1581,6 +1684,10 @@ def compare_command(
             data_warnings=[],
             forecasts=[],
             research=research,
+            current_weight=current_weight,
+            current_shares=current_shares,
+            total_assets=total_assets,
+            holding_source=holding_source,
         )
         packages.append(pkg)
 
@@ -1665,7 +1772,10 @@ def compare_command(
 
 @app.command("morning")
 def morning_command(
-    capital: Annotated[float, typer.Option(help="账户总可用资金（元）")] = 100000.0,
+    capital: Annotated[
+        float | None,
+        typer.Option(help="临时覆盖账户总资产；默认读取最新持仓快照或 [portfolio]"),
+    ] = None,
     notify: Annotated[bool, typer.Option(help="是否发送 macOS 桌面弹窗通知")] = True,
 ) -> None:
     """生成 09:15 集合竞价前券商 App 预埋单/条件单晨报并输出挂单网格。"""
@@ -1673,7 +1783,7 @@ def morning_command(
     brief = generate_morning_brief(config, total_capital=capital, send_notification=notify)
     console.print("\n[bold green]🌅 盘前挂单与执行晨报已生成！[/bold green]")
     console.print(f"报告路径: [bold cyan]{brief.report_path}[/bold cyan]")
-    console.print(f"基准资金: [bold]{capital:,.2f} CNY[/bold]\n")
+    console.print(f"账户总资产: [bold]{brief.total_capital:,.2f} CNY[/bold]\n")
 
     table = Table(title=f"09:15 盘前券商挂单执行表 ({brief.as_of.isoformat()})")
     table.add_column("标的 / 优先级", style="bold")
@@ -1686,6 +1796,23 @@ def morning_command(
     table.add_column("券商下单类型", style="cyan")
 
     for it in brief.items:
+        exit_plan = it.package.exit_plan
+        if exit_plan and exit_plan.status in {
+            ExitStatus.REVIEW,
+            ExitStatus.REDUCE,
+            ExitStatus.EXIT,
+        }:
+            table.add_row(
+                f"{it.priority}\n{it.name} ({it.canonical})",
+                f"{it.current_price:.2f} {it.currency}",
+                exit_plan.status.value,
+                "按券商盘口复核",
+                "—",
+                f"卖出 {exit_plan.sell_shares} 股",
+                f"{exit_plan.estimated_proceeds:,.2f}",
+                "取消买单/减仓复核",
+            )
+            continue
         for tier in it.plan.tiers:
             lots = tier.shares // 100
             order_type = (

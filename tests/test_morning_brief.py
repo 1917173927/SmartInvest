@@ -22,6 +22,11 @@ role = "core"
 valuation_model = "insurer"
 fair_pe = 9.0
 fair_pb = 1.10
+current_shares = 1000
+
+[investor]
+capital_is_surplus = true
+uses_leverage = false
 """,
         encoding="utf-8",
     )
@@ -72,7 +77,10 @@ fair_pb = 1.10
     assert brief.report_path.exists()
     content = brief.report_path.read_text(encoding="utf-8")
     assert "SmartInvest 盘前挂单与执行晨报" in content
-    assert "建议手数" in content
+    assert "优先减仓/退出复核" in content
+    assert "建议卖出" in content
+    assert "不生成或保留任何买入挂单" in content
+    assert "首笔底仓" not in content
 
 
 def test_cli_morning_command(tmp_path, monkeypatch) -> None:

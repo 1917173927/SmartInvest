@@ -236,6 +236,10 @@ current_shares = 300
 [portfolio]
 cn_account_assets = 51546.80
 cn_account_assets_as_of = "2026-09-01"
+
+[investor]
+capital_is_surplus = true
+uses_leverage = false
 """,
         encoding="utf-8",
     )
@@ -300,14 +304,13 @@ cn_account_assets_as_of = "2026-09-01"
         env={"COLUMNS": "160"},
     )
     assert result.exit_code == 0
-    assert "实盘阶梯建仓测算" in result.output
-    assert "首笔底仓" in result.output
-    assert "建议手数" in result.output
-    assert "逻辑失效与止损参考线" in result.output
+    assert "实盘仓位与交易纪律测算" in result.output
+    assert "减仓与退出执行计划" in result.output
+    assert "卖出 200 股" in result.output
     assert "盘中执行价: 57.10 CNY" in result.output
     assert "账户总资产: 51,546.80 CNY" in result.output
     assert "当前持仓: 300 股" in result.output
-    assert "当前动作：不新增买入" in result.output
+    assert "减仓至用户指定目标" in result.output
 
     manual_result = runner.invoke(
         app,
@@ -317,7 +320,7 @@ cn_account_assets_as_of = "2026-09-01"
     assert manual_result.exit_code == 0
     assert "人工输入价格（未由系统验证，仅供复现/测算）" in manual_result.output
     assert "人工输入价格不是系统获取的实时数据" in manual_result.output
-    assert "当前动作：暂停下单" in manual_result.output
+    assert "执行状态：暂停下单" in manual_result.output
 
 
 def test_cli_compare_command(tmp_path, monkeypatch) -> None:

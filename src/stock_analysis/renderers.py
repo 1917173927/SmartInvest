@@ -374,6 +374,40 @@ def render_analysis_markdown(package: AnalysisPackage) -> str:
         for item in package.research.evidence:
             source_text = f"[{item.title}]({item.source_url})" if item.source_url else item.title
             lines.append(f"- [{item.id}] {source_text}，发布于 {item.published_at.isoformat()}")
+    if package.exit_plan:
+        exit_plan = package.exit_plan
+        current_weight = (
+            f"{exit_plan.current_weight:.2%}" if exit_plan.current_weight is not None else "—"
+        )
+        target_weight = (
+            f"{exit_plan.target_weight:.2%}" if exit_plan.target_weight is not None else "—"
+        )
+        current_shares = (
+            f"{exit_plan.current_shares} 股" if exit_plan.current_shares is not None else "—"
+        )
+        target_shares = (
+            f"{exit_plan.target_shares} 股" if exit_plan.target_shares is not None else "—"
+        )
+        lines.extend(
+            [
+                "",
+                "## 🛑 减仓与退出纪律",
+                "",
+                f"- 状态：**{exit_plan.status.value}**",
+                f"- 当前动作：**{exit_plan.action}**",
+                f"- 持仓口径：{exit_plan.holding_source}",
+                f"- 当前持仓：{current_shares} / {current_weight}",
+                f"- 卖出计划：**{exit_plan.sell_shares} 股**，"
+                f"预计剩余 {target_shares} / {target_weight}",
+                f"- 参考回笼资金：{exit_plan.estimated_proceeds:,.2f} {package.currency}",
+            ]
+        )
+        for reason in exit_plan.reasons:
+            lines.append(f"- 触发依据：{reason}")
+        if exit_plan.trigger_conditions:
+            lines.append("- 后续失效/退出复核条件：" + "；".join(exit_plan.trigger_conditions[:4]))
+        for warning in exit_plan.warnings:
+            lines.append(f"- 执行警告：{warning}")
     if package.staging_plan and package.staging_plan.available:
         plan = package.staging_plan
         lines.extend(

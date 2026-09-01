@@ -2,6 +2,8 @@
 max_portfolio_drawdown = 0.25
 core_position_limit = 0.35
 satellite_position_limit = 0.15
+# 负面信号触发“减仓/回避”时，默认把当前仓位降至一半（仍受角色上限约束）。
+reduction_target_fraction = 0.50
 sector_limit = 0.60
 cash_floor = 0.05
 short_trade_risk = 0.01
@@ -13,7 +15,7 @@ uses_leverage = false
 minimum_horizon_years = 3
 
 [portfolio]
-# 必须填写券商账户的真实总资产；stock size 不再静默假设为 100000。
+# 没有可解析的最新持仓快照时，必须填写券商账户的真实总资产。
 # cn_account_assets = 51546.80
 # cn_account_assets_as_of = "2026-09-01"
 # hk_account_assets = 6500.00
