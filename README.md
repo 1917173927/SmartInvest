@@ -43,9 +43,6 @@
 
 ## 🤖 Agent 协作与实盘操作 SOP 指南
 
-开发阶段的 Codex + Antigravity CLI 隔离协作方式见
-[Antigravity CLI 双 Agent 协作](docs/ANTIGRAVITY_CLI.md)。
-
 为确保人类投资者及各类 AI Agent 对齐工作进度与操作规范，系统制定了以下 **4 个标准化操作流程 (SOP)**：
 
 ```
