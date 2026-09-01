@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - "codex/**"
+  pull_request:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint, Format & Test Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --extra data --extra charts --extra dev
+
+      - name: Check code formatting (Ruff)
+        run: uv run ruff format --check .
+
+      - name: Run code linter (Ruff)
+        run: uv run ruff check .
+
+      - name: Run Pytest with Coverage (>= 70%)
+        run: uv run pytest --cov=src/stock_analysis --cov-report=term --cov-report=xml --cov-fail-under=70

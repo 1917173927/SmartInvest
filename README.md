@@ -22,7 +22,7 @@
    - 基于 Amazon Chronos-2 预训练   - Yang-Zhang(2000) 极小方差波动率 - 自动跟踪历史滚动分位数损失
    - 跨行业海量真实时序学习通用特征  - Asness(2019) QMJ 质量四维模型  - 动态反向损失定权 (Inverse Loss)
    - 输出完整概率分布 (q10/q50/q90) - Blitz(2013) 残差特质动量平滑度 - 连续预测偏误触发熔断与自动降级
-   - 无需用户从零训练权重           - 经典闭式解析公式，杜绝过拟合   - 胜率 62.5%~63.2%，盈亏比 3.84
+   - 无需用户从零训练权重           - 经典闭式解析公式，杜绝过拟合   - 可复现基准见 docs/BACKTEST_BENCHMARK.md
 ```
 
 1. **时序通用大模型（Zero-Shot Foundation Models）**：
@@ -150,7 +150,7 @@ uv run python scripts/install_launchd.py
    - 每次分析与回测只截取 $t \le \text{as\_of}$ 历史切片，未来的开高低收和未发布财报在内存中完全不存在。
 2. **纯样本外非重叠封测（Purged Walk-Forward）**：
    - 步长等于预测期限（`stride = horizon_days`），测试窗口互不重叠，彻底消除自相关性。
-   - 在 A 股真实历史大样本上实测达到 **62.5%~63.2% 胜率** 与 **1.98~3.84 盈亏比**。
+   - 详细回测规范、股票池定义、摩擦成本与最新样本外复现数据统一记录于 [docs/BACKTEST_BENCHMARK.md](docs/BACKTEST_BENCHMARK.md)。
 3. **不可篡改的 SHA-256 事前预测凭证（Receipts）**：
    - 预测在发出时即计算哈希并固化存入 SQLite，未来到期后自动核验真实盈亏，确保无任何后验作弊。
 
