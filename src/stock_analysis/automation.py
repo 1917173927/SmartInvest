@@ -36,6 +36,7 @@ from stock_analysis.decision import (
     render_analysis_markdown,
     render_portfolio_markdown,
 )
+from stock_analysis.files import atomic_write_text
 from stock_analysis.forecast import (
     MEDIUM_HORIZONS,
     SHORT_HORIZONS,
@@ -166,9 +167,7 @@ def _write_report(
         if relative_dir
         else config.reports_dir / filename
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-    return path
+    return atomic_write_text(path, content)
 
 
 def organize_reports(config: AppConfig) -> list[Path]:

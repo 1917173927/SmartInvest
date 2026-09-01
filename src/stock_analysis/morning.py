@@ -23,6 +23,7 @@ from stock_analysis.decision import (
     analyze_package,
     compute_staging_plan,
 )
+from stock_analysis.files import atomic_write_text
 from stock_analysis.indicators import macro_assessments
 from stock_analysis.research import run_research
 
@@ -246,11 +247,11 @@ def generate_morning_brief(
     out_dir = config.home / "06-自动分析" / "盘前晨报"
     out_dir.mkdir(parents=True, exist_ok=True)
     report_file = out_dir / f"{today.isoformat()}-盘前挂单晨报.md"
-    report_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_text(report_file, "\n".join(lines) + "\n")
     brief.report_path = report_file
 
     latest_file = config.home / "06-自动分析" / "最新盘前挂单晨报.md"
-    latest_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_text(latest_file, "\n".join(lines) + "\n")
 
     # 4. macOS Native Notification
     if send_notification and platform.system() == "Darwin":
