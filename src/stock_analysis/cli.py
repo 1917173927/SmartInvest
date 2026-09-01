@@ -241,15 +241,9 @@ def _resolve_size_capital(
         return override, "命令行临时覆盖"
 
     if instrument.market.value in {"CN", "CNFUND"}:
-        try:
-            snapshot = latest_portfolio_snapshot(config)
-            if snapshot.total_cny_assets and snapshot.total_cny_assets > 0:
-                return (
-                    snapshot.total_cny_assets,
-                    f"持仓快照 {snapshot.path.name}（{snapshot.as_of.isoformat()}）",
-                )
-        except (FileNotFoundError, OSError, ValueError):
-            pass
+        _, snapshot_assets, holding_source = resolve_holding_context(config, instrument.canonical)
+        if snapshot_assets and snapshot_assets > 0 and holding_source.startswith("持仓快照"):
+            return snapshot_assets, holding_source
 
     portfolio = config.section("portfolio")
     key = {

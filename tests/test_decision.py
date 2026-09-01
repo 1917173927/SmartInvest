@@ -12,6 +12,7 @@ from stock_analysis.decision import (
     build_decisions,
     compute_exit_plan,
     latest_portfolio_snapshot,
+    resolve_holding_context,
     valuation_range,
 )
 from stock_analysis.forecast import ForecastBundle, ForecastEstimate, ModelStatus
@@ -52,6 +53,10 @@ def test_portfolio_parser_uses_asset_name_mapping(tmp_path) -> None:
     (holdings / "2026-08-27-持仓快照.md").write_text(
         """---
 date: 2026-08-27
+status: partial
+source: fixture
+total_assets_status: carried-forward
+open_orders_status: pending
 ---
 # 持仓
 ## A 股明细
@@ -84,6 +89,17 @@ date: 2026-08-27
     assert snapshot.cash_cny == 20000
     assert snapshot.positions[0].symbol == "CN:601318"
     assert snapshot.positions[0].role == "core"
+    assert snapshot.status == "partial"
+    assert snapshot.total_assets_status == "carried-forward"
+    assert snapshot.open_orders_status == "pending"
+    assert "不得视为实时券商总资产" in "；".join(snapshot.warnings)
+    assert "成交后持仓可能继续变化" in "；".join(snapshot.warnings)
+    shares, total_assets, source = resolve_holding_context(config, "CN:601318")
+    assert shares == 300
+    assert total_assets == 75000
+    assert "来源 fixture" in source
+    assert "总资产 carried-forward" in source
+    assert "委托 pending" in source
 
 
 def _exit_decision(action: str, target: float | None) -> HorizonDecision:

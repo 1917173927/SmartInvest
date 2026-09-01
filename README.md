@@ -248,6 +248,10 @@ current_shares = 300
 `stock-analysis.toml`。`stock morning` 不传 `--capital` 时也使用这一口径，不再默认假设
 账户总资产为 100,000 元。
 
+持仓快照可使用 `status: partial`、`total_assets_status: carried-forward` 和
+`open_orders_status: pending` 标记截图缺项、沿用总资产或待成交委托。CLI 与报告会把这些
+降级状态附在持仓来源中；“已报”委托不会被当作已成交持仓。
+
 当当前仓位超过核心/卫星仓位上限，或多周期判断触发“减仓/回避”“退出”时，报告会生成
 独立的“减仓与退出计划”，包括当前仓位、纪律目标、建议卖出股数、卖出后持股和参考回笼
 资金。A 股部分减仓按 100 股整手向上取整，清仓时允许卖出全部余股。触发退出计划后系统会

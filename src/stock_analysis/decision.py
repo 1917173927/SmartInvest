@@ -156,6 +156,10 @@ class PortfolioSnapshot(BaseModel):
     total_cny_assets: float | None
     cash_cny: float | None
     positions: list[PortfolioPosition]
+    status: str = "current"
+    source: str = "未注明"
+    total_assets_status: str = "verified"
+    open_orders_status: str = "none"
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -1331,6 +1335,14 @@ def latest_portfolio_snapshot(config: AppConfig) -> PortfolioSnapshot:
         if date_match
         else date.fromisoformat(path.name[:10])
     )
+    status_match = re.search(r"^status:\s*(.+)$", text, flags=re.MULTILINE)
+    source_match = re.search(r"^source:\s*(.+)$", text, flags=re.MULTILINE)
+    total_status_match = re.search(r"^total_assets_status:\s*(.+)$", text, flags=re.MULTILINE)
+    open_orders_match = re.search(r"^open_orders_status:\s*(.+)$", text, flags=re.MULTILINE)
+    snapshot_status = status_match.group(1).strip() if status_match else "current"
+    source = source_match.group(1).strip() if source_match else "未注明"
+    total_assets_status = total_status_match.group(1).strip() if total_status_match else "verified"
+    open_orders_status = open_orders_match.group(1).strip() if open_orders_match else "none"
     total_match = re.search(r"已记录人民币资产暂为\s*\*\*([\d,.]+)(?:\*\*)?\s*元", text)
     total_assets = _parse_number(total_match.group(1)) if total_match else None
     positions: list[PortfolioPosition] = []
@@ -1370,6 +1382,12 @@ def latest_portfolio_snapshot(config: AppConfig) -> PortfolioSnapshot:
         warnings.append("未解析到完整人民币资产合计，仓位只能按已解析资产估算")
     if any(item.symbol is None for item in positions):
         warnings.append("部分持仓名称没有映射到标准证券代码")
+    if snapshot_status != "current":
+        warnings.append(f"持仓快照状态为 {snapshot_status}，部分账户字段尚未核验")
+    if total_assets_status != "verified":
+        warnings.append(f"总资产状态为 {total_assets_status}，不得视为实时券商总资产")
+    if open_orders_status != "none":
+        warnings.append(f"存在状态为 {open_orders_status} 的委托，成交后持仓可能继续变化")
     warnings.append("港币和美元资产未折算，不作为完整组合权重")
     return PortfolioSnapshot(
         path=path,
@@ -1377,6 +1395,10 @@ def latest_portfolio_snapshot(config: AppConfig) -> PortfolioSnapshot:
         total_cny_assets=total_assets,
         cash_cny=cash if cash_found else None,
         positions=positions,
+        status=snapshot_status,
+        source=source,
+        total_assets_status=total_assets_status,
+        open_orders_status=open_orders_status,
         warnings=warnings,
     )
 
@@ -1407,10 +1429,18 @@ def resolve_holding_context(config: AppConfig, symbol: str) -> tuple[int | None,
             else:
                 configured_shares = config.asset(symbol).get("current_shares")
                 shares = int(configured_shares) if configured_shares is not None else None
+            qualifiers = [f"来源 {snapshot.source}"]
+            if snapshot.status != "current":
+                qualifiers.append(f"状态 {snapshot.status}")
+            if snapshot.total_assets_status != "verified":
+                qualifiers.append(f"总资产 {snapshot.total_assets_status}")
+            if snapshot.open_orders_status != "none":
+                qualifiers.append(f"委托 {snapshot.open_orders_status}")
+            qualifier_text = f"；{'；'.join(qualifiers)}" if qualifiers else ""
             return (
                 shares,
                 snapshot.total_cny_assets,
-                f"持仓快照 {snapshot.path.name}（{snapshot.as_of.isoformat()}）",
+                f"持仓快照 {snapshot.path.name}（{snapshot.as_of.isoformat()}{qualifier_text}）",
             )
     except (FileNotFoundError, OSError, ValueError):
         pass
