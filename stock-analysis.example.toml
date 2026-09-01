@@ -12,6 +12,15 @@ capital_is_surplus = true
 uses_leverage = false
 minimum_horizon_years = 3
 
+[portfolio]
+# 必须填写券商账户的真实总资产；stock size 不再静默假设为 100000。
+# cn_account_assets = 51546.80
+# cn_account_assets_as_of = "2026-09-01"
+# hk_account_assets = 6500.00
+# hk_account_assets_as_of = "2026-09-01"
+# us_account_assets = 1178.08
+# us_account_assets_as_of = "2026-09-01"
+
 [forecast]
 model_id = "amazon/chronos-2"
 device = "cpu"
@@ -71,6 +80,7 @@ include_probability_fan = true
 name = "中国平安"
 sector = "金融"
 role = "core"
+current_shares = 0 # 按券商当前持仓更新；stock size 会先扣除已有仓位
 valuation_model = "insurer"
 fair_pe = 10.5
 fair_pb = 1.25

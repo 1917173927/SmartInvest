@@ -30,6 +30,7 @@ from stock_analysis.data import (
     YFinanceProvider,
     backfill_symbol,
     coverage_warnings,
+    fetch_latest_quote,
     quality_summary,
     safe_filename_component,
     sync_symbol,
@@ -40,6 +41,7 @@ from stock_analysis.decision import (
     AnalysisPackage,
     Horizon,
     HorizonDecision,
+    StagingPlan,
     analyze_package,
     compute_staging_plan,
     create_receipts,
@@ -99,6 +101,89 @@ def _load_analysis_frame(
     actions = database.load_actions(symbol, as_of)
     frame, warnings = total_return_frame(bars, actions)
     return frame, warnings
+
+
+def _resolve_size_capital(
+    config: AppConfig,
+    instrument: Instrument,
+    override: float | None,
+) -> tuple[float, str]:
+    if override is not None:
+        if override <= 0:
+            raise typer.BadParameter("--capital 必须大于 0")
+        return override, "命令行临时覆盖"
+
+    portfolio = config.section("portfolio")
+    key = {
+        "CN": "cn_account_assets",
+        "CNFUND": "cn_account_assets",
+        "HK": "hk_account_assets",
+        "US": "us_account_assets",
+    }[instrument.market.value]
+    value = portfolio.get(key)
+    try:
+        capital = float(value)
+    except (TypeError, ValueError) as exc:
+        raise typer.BadParameter(
+            f"未配置 portfolio.{key}；请在 stock-analysis.toml 设置真实账户资产，"
+            "或显式传入 --capital"
+        ) from exc
+    if capital <= 0:
+        raise typer.BadParameter(f"portfolio.{key} 必须大于 0")
+    as_of = portfolio.get(f"{key}_as_of", "日期未注明")
+    return capital, f"配置 portfolio.{key}，截至 {as_of}"
+
+
+def _execution_guidance(
+    current_price: float,
+    plan: StagingPlan,
+    actionable: bool,
+    *,
+    current_weight: float,
+) -> str:
+    if not actionable:
+        return (
+            "[bold red]当前动作：暂停下单。[/bold red] 实时报价不可用；先在券商核对现价，"
+            "再用 [bold]--price 券商现价[/bold] 重新运行。"
+        )
+    if len(plan.tiers) < 3:
+        return "[bold red]当前动作：暂停下单。[/bold red] 未生成完整三档计划。"
+    if current_weight >= plan.total_target_weight:
+        return (
+            f"[bold red]当前动作：不新增买入，并取消未成交加仓单。[/bold red] 当前仓位约 "
+            f"{current_weight:.2%}，已达到或超过 {plan.total_target_weight:.0%} 目标上限；"
+            "先核对持仓数量和账户资产，不能继续按三档计划加仓。"
+        )
+
+    first, second, third = plan.tiers[:3]
+    invalidation = plan.invalidation_price
+    if invalidation and current_price < invalidation:
+        return (
+            f"[bold red]当前动作：取消未成交买单并复核投资逻辑。[/bold red] 现价已低于失效线 "
+            f"{invalidation:.2f}；不要机械补仓。"
+        )
+    if current_price > first.target_price:
+        gap = current_price / first.target_price - 1
+        return (
+            f"[bold yellow]当前动作：等待，不追涨。[/bold yellow] 现价高于首笔价 "
+            f"{gap:.2%}；如需预埋，仅挂不高于 {first.target_price:.2f} 的限价/条件单。"
+        )
+    if current_price > second.target_price:
+        return (
+            f"[bold green]当前动作：只处理第一档。[/bold green] 价格已到首笔区；"
+            f"限价不高于 {first.target_price:.2f}，本档最多 {first.shares} 股，"
+            "第二、三档不要同时市价买入。"
+        )
+    if current_price > third.target_price:
+        return (
+            f"[bold yellow]当前动作：核对第一档成交和当前仓位后，再考虑第二档。[/bold yellow] "
+            f"第二档限价不高于 {second.target_price:.2f}，本档最多 {second.shares} 股。"
+        )
+    return (
+        "[bold red]当前动作：价格已到第三档深跌区。[/bold red] 先排除基本面或事件性风险；"
+        f"仅在前两档已按计划执行且总仓位未超限时，才考虑不高于 {third.target_price:.2f} "
+        f"的最多 {third.shares} 股限价单。"
+    )
 
 
 @app.command()
@@ -1043,7 +1128,18 @@ def dash_command() -> None:
 @app.command("size")
 def size_command(
     symbol: Annotated[str, typer.Argument(help="标准证券代码，如 CN:601318")],
-    capital: Annotated[float, typer.Option(help="账户总可用资产/资本规模（元）")] = 100000.0,
+    capital: Annotated[
+        float | None,
+        typer.Option(help="临时覆盖配置中的账户总资产；不传则读取 [portfolio]"),
+    ] = None,
+    price: Annotated[
+        float | None,
+        typer.Option(help="券商盘中现价；优先级高于网络报价，用于下单前人工核对"),
+    ] = None,
+    held_shares: Annotated[
+        int | None,
+        typer.Option(help="临时覆盖配置中的当前持股数；不传则读取资产的 current_shares"),
+    ] = None,
     target_weight: Annotated[
         float | None, typer.Option(help="自定义目标仓位上限（如 0.15 表示 15%）")
     ] = None,
@@ -1053,10 +1149,21 @@ def size_command(
 ) -> None:
     """实盘仓位测算与阶梯挂单生成器：根据账户资产与风险预算，精确计算三档买点股数与止损线。"""
     config, database = _context()
-    canonical = Instrument.parse(symbol).canonical
+    instrument = Instrument.parse(symbol)
+    canonical = instrument.canonical
     profile = config.asset(canonical)
     name = str(profile.get("name", canonical))
     role = str(profile.get("role", "satellite"))
+    resolved_capital, capital_source = _resolve_size_capital(config, instrument, capital)
+    configured_shares = profile.get("current_shares", 0) if held_shares is None else held_shares
+    try:
+        current_shares = int(configured_shares)
+    except (TypeError, ValueError) as exc:
+        database.close()
+        raise typer.BadParameter("current_shares/--held-shares 必须是非负整数") from exc
+    if current_shares < 0:
+        database.close()
+        raise typer.BadParameter("current_shares/--held-shares 必须是非负整数")
 
     bars = database.load_bars(canonical, date.today())
     if bars.empty:
@@ -1064,8 +1171,27 @@ def size_command(
         console.print("[red]没有可用行情缓存，请先运行 stock sync。[/red]")
         raise typer.Exit(1)
 
-    current_price = float(bars.iloc[-1]["close"])
+    reference_price = float(bars.iloc[-1]["close"])
+    reference_date = pd.Timestamp(bars.iloc[-1]["trade_date"]).date()
     currency = str(bars.iloc[-1].get("currency", "CNY"))
+    quote_warnings: list[str] = []
+    quote_actionable = True
+    if price is not None:
+        if price <= 0:
+            database.close()
+            raise typer.BadParameter("--price 必须大于 0")
+        current_price = price
+        price_source = "券商现价（手工输入）"
+    else:
+        quote, quote_warnings = fetch_latest_quote(instrument)
+        if quote is not None:
+            current_price = quote.price
+            fetched_at = quote.fetched_at.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+            price_source = f"{quote.source}，获取于 {fetched_at}（可能延迟）"
+        else:
+            current_price = reference_price
+            price_source = f"历史日线缓存，交易日 {reference_date.isoformat()}"
+            quote_actionable = False
     quality, _ = quality_summary(bars, date.today())
     frame, _ = _load_analysis_frame(database, canonical, date.today())
 
@@ -1093,24 +1219,44 @@ def size_command(
         if target_weight is not None
         else (package.decisions[0].target_position if package.decisions else None)
     )
+    target_weight = (
+        assigned_weight if assigned_weight is not None else (0.20 if role == "core" else 0.10)
+    )
+    current_position_value = current_shares * current_price
+    current_weight = current_position_value / resolved_capital
 
     plan = compute_staging_plan(
-        current_price=current_price,
+        current_price=reference_price,
         valuation_range=package.valuation_range,
         price_zones=package.price_zones,
         role=role,
-        total_capital=capital,
+        total_capital=resolved_capital,
         target_position=assigned_weight,
         risk_budget=risk_budget,
+        existing_position_value=current_position_value,
     )
 
     console.print(f"\n[bold cyan]🎯 实盘阶梯建仓测算：{name} ({canonical})[/bold cyan]")
-    allocated_cap = capital * plan.total_target_weight
+    allocated_cap = resolved_capital * plan.total_target_weight
     console.print(
-        f"现价: [bold]{current_price:.2f} {currency}[/bold] | "
-        f"账户总资产: [bold]{capital:,.2f} {currency}[/bold] | "
+        f"盘中执行价: [bold]{current_price:.2f} {currency}[/bold] | "
+        f"日线分析基准: [bold]{reference_price:.2f} {currency}[/bold] ({reference_date})"
+    )
+    console.print(f"报价来源: {price_source}")
+    console.print(
+        f"账户总资产: [bold]{resolved_capital:,.2f} {currency}[/bold] "
+        f"([dim]{capital_source}[/dim]) | "
         f"目标上限: [bold]{plan.total_target_weight:.0%}[/bold] ({allocated_cap:,.2f} {currency})"
     )
+    console.print(
+        f"当前持仓: [bold]{current_shares} 股[/bold]，按执行价计 "
+        f"[bold]{current_position_value:,.2f} {currency}[/bold]，约占账户 "
+        f"[bold]{current_weight:.2%}[/bold]；剩余目标额度 "
+        f"[bold]{max(0.0, resolved_capital * target_weight - current_position_value):,.2f} "
+        f"{currency}[/bold]"
+    )
+    for warning in quote_warnings:
+        console.print(f"[yellow]报价提示：{warning}[/yellow]")
 
     table = Table(title="阶梯挂单执行计划 (Staging Execution Plan)")
     table.add_column("批次", style="bold")
@@ -1130,10 +1276,26 @@ def size_command(
             f"{tier.shares} 股",
             f"{lots} 手" if lots > 0 else "不足1手",
             f"{tier.allocated_amount:,.2f} {currency}",
-            tier.rationale,
+            (
+                tier.rationale
+                if tier.shares > 0
+                else "当前剩余目标额度不足或仓位已达上限；本档不下单"
+            ),
         )
 
     console.print(table)
+    console.print(
+        _execution_guidance(
+            current_price,
+            plan,
+            quote_actionable,
+            current_weight=current_weight,
+        )
+    )
+    console.print(
+        "[dim]下单前必须以券商盘口复核价格、可用资金、已成交数量和当前总仓位；"
+        "本工具输出是条件计划，不是收益承诺。[/dim]"
+    )
 
     if plan.invalidation_price:
         max_loss = max(
@@ -1143,7 +1305,7 @@ def size_command(
                 for tier in plan.tiers
             ),
         )
-        loss_pct_of_capital = max_loss / capital if capital else 0.0
+        loss_pct_of_capital = max_loss / resolved_capital
         console.print(
             f"[bold red]🛑 逻辑失效与止损参考线[/bold red]：< "
             f"[bold]{plan.invalidation_price:.2f} {currency}[/bold]"

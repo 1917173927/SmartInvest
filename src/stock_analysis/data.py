@@ -252,6 +252,22 @@ class SyncResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class MarketQuote(BaseModel):
+    symbol: str
+    price: float
+    currency: str
+    source: str
+    fetched_at: datetime = Field(default_factory=utc_now)
+    quality: DataQuality = DataQuality.B
+
+    @field_validator("price")
+    @classmethod
+    def positive_price(cls, value: float) -> float:
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("报价必须是正数")
+        return float(value)
+
+
 class MarketDataProvider(Protocol):
     name: str
 
@@ -1152,6 +1168,35 @@ class AkShareProvider:
             raise RuntimeError("AKShare 未返回行情")
         return self._frame_to_bars(frame, instrument, source_name=source_name)
 
+    def fetch_quote(self, instrument: Instrument) -> MarketQuote:
+        """Fetch one current A-share quote without storing it as a completed daily bar."""
+        if instrument.market is not Market.CN:
+            raise ValueError("AKShare 单证券报价当前只支持 A 股")
+        if not self.available():
+            raise RuntimeError("未安装 AKShare；请运行 uv sync --extra data")
+        import akshare as ak
+
+        frame = ak.stock_bid_ask_em(symbol=instrument.code)
+        if frame is None or frame.empty:
+            raise RuntimeError("AKShare 未返回盘中报价")
+        item_column = _find_column(frame, ["item", "项目"])
+        value_column = _find_column(frame, ["value", "数值"])
+        if not item_column or not value_column:
+            raise RuntimeError(f"AKShare 报价列不兼容: {list(frame.columns)}")
+        values = {
+            str(row[item_column]).strip().lower(): row[value_column] for _, row in frame.iterrows()
+        }
+        price = _number(values.get("最新", values.get("latest")), -1)
+        if price <= 0:
+            raise RuntimeError("AKShare 报价缺少有效最新价")
+        return MarketQuote(
+            symbol=instrument.canonical,
+            price=price,
+            currency=instrument.currency,
+            source="akshare-eastmoney-quote",
+            quality=DataQuality.B,
+        )
+
     def _frame_to_bars(
         self, frame: pd.DataFrame, instrument: Instrument, *, source_name: str | None = None
     ) -> list[Bar]:
@@ -1336,6 +1381,26 @@ class YFinanceProvider:
             raise RuntimeError("yfinance 行情清洗后为空")
         return results
 
+    def fetch_quote(self, instrument: Instrument) -> MarketQuote:
+        """Fetch the provider's latest snapshot; exchanges may distribute it with delay."""
+        if not self.supports(instrument):
+            raise ValueError("yfinance 不支持该证券")
+        if not self.available():
+            raise RuntimeError("未安装 yfinance；请运行 uv sync --extra data")
+        import yfinance as yf
+
+        ticker = yf.Ticker(instrument.yahoo_symbol)
+        price = _number(ticker.fast_info["last_price"], -1)
+        if price <= 0:
+            raise RuntimeError("yfinance 未返回有效最新价")
+        return MarketQuote(
+            symbol=instrument.canonical,
+            price=price,
+            currency=instrument.currency,
+            source="yfinance-quote",
+            quality=DataQuality.B,
+        )
+
     def fetch_actions(
         self, instrument: Instrument, start: date, end: date
     ) -> list[CorporateAction]:
@@ -1478,6 +1543,25 @@ def provider_order(instrument: Instrument) -> list[MarketDataProvider]:
     if instrument.market is Market.HK:
         return [akshare, yahoo]
     return [yahoo]
+
+
+def fetch_latest_quote(
+    instrument: Instrument,
+    providers: Sequence[object] | None = None,
+) -> tuple[MarketQuote | None, list[str]]:
+    """Return a best-effort execution quote and transparent provider warnings."""
+    candidates = list(providers) if providers is not None else provider_order(instrument)
+    warnings: list[str] = []
+    for provider in candidates:
+        fetch_quote = getattr(provider, "fetch_quote", None)
+        if fetch_quote is None:
+            continue
+        try:
+            return fetch_quote(instrument), warnings
+        except Exception as exc:
+            name = str(getattr(provider, "name", type(provider).__name__))
+            warnings.append(f"{name} 实时报价失败（{type(exc).__name__}）")
+    return None, warnings
 
 
 def sync_symbol(

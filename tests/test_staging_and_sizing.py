@@ -63,3 +63,34 @@ def test_compute_staging_plan_basic() -> None:
     assert plan.tiers[0].target_price >= plan.tiers[1].target_price >= plan.tiers[2].target_price
     assert plan.invalidation_price is not None
     assert plan.invalidation_price < plan.tiers[2].target_price
+
+
+def test_staging_plan_never_exceeds_remaining_target_budget() -> None:
+    vr = ValuationRange(available=False, method="test")
+
+    plan = compute_staging_plan(
+        current_price=55.82,
+        valuation_range=vr,
+        price_zones=[],
+        role="core",
+        total_capital=51546.80,
+        target_position=0.20,
+    )
+
+    assert plan.total_capital <= 51546.80 * 0.20
+    assert sum(tier.allocated_amount for tier in plan.tiers) == plan.total_capital
+
+
+def test_staging_plan_has_no_new_orders_when_existing_position_exceeds_target() -> None:
+    plan = compute_staging_plan(
+        current_price=55.82,
+        valuation_range=ValuationRange(available=False, method="test"),
+        price_zones=[],
+        total_capital=51546.80,
+        target_position=0.20,
+        existing_position_value=300 * 57.10,
+    )
+
+    assert plan.total_shares == 0
+    assert plan.total_capital == 0
+    assert all(tier.shares == 0 for tier in plan.tiers)

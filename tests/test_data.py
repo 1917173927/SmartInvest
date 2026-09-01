@@ -16,9 +16,11 @@ from stock_analysis.data import (
     Database,
     Instrument,
     Market,
+    MarketQuote,
     YFinanceProvider,
     _normalize_provider_metric,
     coverage_warnings,
+    fetch_latest_quote,
     quality_summary,
     sync_symbol,
     total_return_frame,
@@ -132,6 +134,49 @@ def test_akshare_uses_tencent_when_eastmoney_fails(monkeypatch) -> None:
         Instrument.parse("CN:601318"), date(2026, 1, 1), date(2026, 1, 3)
     )
     assert bars[0].source == "akshare-tencent"
+
+
+def test_akshare_fetches_single_security_quote(monkeypatch) -> None:
+    class FakeAkShare:
+        @staticmethod
+        def stock_bid_ask_em(**_kwargs):
+            return pd.DataFrame([{"item": "最新", "value": 57.10}])
+
+    monkeypatch.setitem(sys.modules, "akshare", FakeAkShare())
+    monkeypatch.setattr(AkShareProvider, "available", staticmethod(lambda: True))
+
+    quote = AkShareProvider().fetch_quote(Instrument.parse("CN:601318"))
+
+    assert quote.price == 57.10
+    assert quote.source == "akshare-eastmoney-quote"
+
+
+def test_latest_quote_falls_back_to_next_provider() -> None:
+    class FailedProvider:
+        name = "failed"
+
+        @staticmethod
+        def fetch_quote(_instrument):
+            raise RuntimeError("unavailable")
+
+    class WorkingProvider:
+        name = "working"
+
+        @staticmethod
+        def fetch_quote(instrument):
+            return MarketQuote(
+                symbol=instrument.canonical,
+                price=57.10,
+                currency="CNY",
+                source="working-quote",
+            )
+
+    quote, warnings = fetch_latest_quote(
+        Instrument.parse("CN:601318"), [FailedProvider(), WorkingProvider()]
+    )
+
+    assert quote is not None and quote.price == 57.10
+    assert warnings == ["failed 实时报价失败（RuntimeError）"]
 
 
 def test_akshare_converts_per_ten_share_corporate_actions(monkeypatch) -> None:

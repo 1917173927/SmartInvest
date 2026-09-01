@@ -823,6 +823,7 @@ def compute_staging_plan(
     total_capital: float = 100000.0,
     target_position: float | None = None,
     risk_budget: float = 0.02,
+    existing_position_value: float = 0.0,
 ) -> StagingPlan:
     """Compute an actionable 3-tier staging execution grid with precise share counts."""
     if current_price <= 0:
@@ -831,7 +832,7 @@ def compute_staging_plan(
     target_weight = (
         target_position if target_position is not None else (0.20 if role == "core" else 0.10)
     )
-    allocated_total_budget = total_capital * target_weight
+    allocated_total_budget = max(0.0, total_capital * target_weight - existing_position_value)
 
     vr = valuation_range
     if vr.available and vr.buy_high and current_price > vr.buy_high:
@@ -886,12 +887,17 @@ def compute_staging_plan(
     tiers: list[StagingTier] = []
     total_shares = 0
     actual_total_capital = 0.0
+    remaining_budget = allocated_total_budget
 
-    for name, w_pct, p, note in zip(tier_names, tier_weights, tier_prices, tier_notes, strict=True):
+    for index, (name, w_pct, p, note) in enumerate(
+        zip(tier_names, tier_weights, tier_prices, tier_notes, strict=True)
+    ):
         tier_budget = allocated_total_budget * w_pct
-        raw_shares = int(tier_budget // (p * 100)) * 100
-        shares = max(100, raw_shares) if allocated_total_budget >= p * 100 else 0
+        shares = int(min(tier_budget, remaining_budget) // (p * 100)) * 100
+        if index == 0 and shares == 0 and remaining_budget >= p * 100:
+            shares = 100
         allocated = shares * p
+        remaining_budget = max(0.0, remaining_budget - allocated)
         total_shares += shares
         actual_total_capital += allocated
         tiers.append(

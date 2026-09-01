@@ -171,6 +171,11 @@ role = "core"
 valuation_model = "insurer"
 fair_pe = 9.0
 fair_pb = 1.10
+current_shares = 300
+
+[portfolio]
+cn_account_assets = 51546.80
+cn_account_assets_as_of = "2026-09-01"
 """,
         encoding="utf-8",
     )
@@ -219,7 +224,7 @@ fair_pb = 1.10
 
     result = runner.invoke(
         app,
-        ["size", "CN:601318", "--capital", "200000", "--target-weight", "0.20"],
+        ["size", "CN:601318", "--price", "57.10", "--target-weight", "0.20"],
         env={"COLUMNS": "160"},
     )
     assert result.exit_code == 0
@@ -227,6 +232,10 @@ fair_pb = 1.10
     assert "首笔底仓" in result.output
     assert "建议手数" in result.output
     assert "逻辑失效与止损参考线" in result.output
+    assert "盘中执行价: 57.10 CNY" in result.output
+    assert "账户总资产: 51,546.80 CNY" in result.output
+    assert "当前持仓: 300 股" in result.output
+    assert "当前动作：不新增买入" in result.output
 
 
 def test_cli_compare_command(tmp_path, monkeypatch) -> None:
