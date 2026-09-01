@@ -10,10 +10,10 @@
 
 | 维度 | Gemini (Antigravity) 推荐职责 | GPT (Codex) 推荐职责 |
 |---|---|---|
-| **协作定位** | **集成 Agent (Integration & Architecture)** | **实现 Agent (Implementation & Algorithms)** |
-| **工作环境** | 保留主工作区（`/Users/b./StockAnalysis`） | 独立 Worktree（`../StockAnalysis-wt-<任务名>`） |
+| **协作定位** | **CLI 实现 Agent (Implementation)** | **编排与集成 Agent (Orchestration & Integration)** |
+| **工作环境** | 由 Codex 指定的独立 Worktree（`../StockAnalysis-wt-<任务名>`） | 保留当前集成工作区，负责创建和审查 Worktree |
 | **核心优势** | 超大上下文全景理解、多模态视觉审计、知识库全局链接 | 强代码逻辑推理、专注算法闭式推导、独立模块精细编码 |
-| **负责领域** | 1. 用户交互与多模态持仓截图/财报视觉审计<br>2. 任务拆分、定义公共接口契约与文件所有权<br>3. Obsidian 知识库全局组织、渲染器与双向链接维护<br>4. 吸收提交（cherry-pick）、解决冲突与全量回归验收 | 1. 独立量化金融指标/公式算法实现（如波动率、动量）<br>2. 独立 CLI 命令与子系统模块化实现<br>3. 单元测试用例与测试夹具（Fixtures）编写<br>4. 输出自测完备的原子 Commit Hash 交付集成 |
+| **负责领域** | 1. 接收 CLI 提示词并只修改授权文件<br>2. 独立模块、测试或文档的闭环实现<br>3. 执行约定的最小验证命令<br>4. 输出自测完备的中文原子 Commit Hash | 1. 任务拆分、接口契约与文件所有权<br>2. 创建外置 Worktree 并通过 CLI 调度 Antigravity<br>3. 代码审查、吸收提交与冲突处理<br>4. 全量回归验收和最终交付 |
 
 ---
 
@@ -32,6 +32,10 @@
 
 - **集成 Agent**：拆分任务、定义接口和文件所有权、保留主工作区、最终审查与合并。
 - **实现 Agent**：只在独立 Git worktree 和独立分支中完成边界清晰的子任务，提交后把提交哈希交给集成 Agent。
+
+默认由 Codex 作为集成 Agent，通过 `scripts/dispatch_antigravity.py` 直接调用官方 `agy` CLI；
+具体命令和安全门禁见 `docs/ANTIGRAVITY_CLI.md`。不依赖本地 MCP，也不得让 Antigravity 操作
+Codex 所在的集成工作区。
 
 ### 1. 任务准备与所有权记录位置
 开始并行前，集成 Agent 与实现 Agent 必须将协商一致的清单**明确记录在交接上下文或本地状态文件 `.stock-analysis/agent-state.json` 中**（供双方与断点恢复时查验），清单包含：
@@ -60,7 +64,8 @@
 
 ## 分支与提交
 
-- 每个并行任务使用独立分支，Codex 分支默认使用 `codex/<简短任务名>`。
+- 每个并行任务使用独立分支，Codex 分支默认使用 `codex/<简短任务名>`，Antigravity
+  分支默认使用 `antigravity/<简短任务名>`。
 - 提交保持小而完整，一个提交只表达一个目的，不混入无关格式化或生成文件。
 - Git 提交主题必须使用中文，并保留 Conventional Commit 类型前缀，例如：
   - `feat: 增加行业估值中枢配置`
