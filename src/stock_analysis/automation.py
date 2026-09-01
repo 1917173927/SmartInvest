@@ -643,6 +643,33 @@ def run_automation(
                     evidence_paths=configured_evidence_paths(config, symbol),
                     use_llm=llm_enabled,
                 )
+                if not llm_enabled:
+                    research_status = "skipped"
+                    research_reason = "LLM 未启用，保留证据检索结果"
+                elif research.status == "degraded":
+                    research_status = "failed"
+                    research_reason = research.summary
+                    if research.warnings:
+                        research_reason += f"；{research.warnings[-1]}"
+                elif research.status == "unavailable":
+                    research_status = "skipped"
+                    research_reason = research.summary
+                elif any("未配置 LLM API 与模型" in warning for warning in research.warnings):
+                    research_status = "failed"
+                    research_reason = research.summary
+                else:
+                    research_status = "executed"
+                    research_reason = (
+                        f"状态 {research.status}；证据 {len(research.evidence)} 条；"
+                        f"有效事件 {len(research.events)} 个"
+                    )
+                _task(
+                    summary,
+                    name="research-llm",
+                    status=research_status,
+                    reason=research_reason,
+                    symbol=symbol,
+                )
                 event_rows = active_event_rows(database, symbol, analysis_date)
                 forecasts = [
                     forecast_one(

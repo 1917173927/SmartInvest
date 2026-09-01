@@ -594,8 +594,9 @@ def auto_command(
         skipped = sum(item["status"] == "skipped" for item in summary.tasks)
         failed = sum(item["status"] == "failed" for item in summary.tasks)
         console.print(
-            f"[green]自动分析完成[/green]：成功 {len(summary.succeeded)}，"
-            f"失败 {len(summary.failed)}；任务执行 {executed} / 跳过 {skipped} / 失败 {failed}"
+            f"[green]自动分析完成[/green]：标的成功 {len(summary.succeeded)}，"
+            f"标的失败 {len(summary.failed)}；子任务执行 {executed} / "
+            f"跳过 {skipped} / 失败 {failed}"
         )
         console.print(f"摘要：{config.reports_dir / '最新摘要.md'}")
         if summary.portfolio_report:

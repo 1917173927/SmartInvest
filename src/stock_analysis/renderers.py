@@ -21,6 +21,10 @@ def _fmt_number(value: float | None, digits: int = 2) -> str:
     return f"{value:.{digits}f}" if value is not None and math.isfinite(value) else "—"
 
 
+def _markdown_cell(value: object) -> str:
+    return " ".join(str(value).replace("|", "\\|").splitlines())
+
+
 def render_executive_summary_card(package: AnalysisPackage) -> list[str]:
     """Render a 3-point executive summary card for quick decision-making."""
     # 1. Contradiction & Balance (Core driver vs headwind)
@@ -334,14 +338,14 @@ def render_analysis_markdown(package: AnalysisPackage) -> str:
     else:
         lines.append(f"- 估值区间：未提供（{vr.method}）")
     lines.extend(["", "## LLM 证据与事件", ""])
-    if package.research.status == "degraded":
+    lines.append(package.research.summary)
+    lines.append(
+        f"- 研究状态：`{package.research.status}`；证据 {len(package.research.evidence)} 条；"
+        f"有效事件 {len(package.research.events)} 个。"
+    )
+    if package.research.warnings:
         lines.append(
-            f"已检索 {len(package.research.evidence)} 条证据；本次显式跳过 LLM，未生成事件因子。"
-        )
-    else:
-        lines.append(
-            f"已检索 {len(package.research.evidence)} 条证据；"
-            f"生成 {len(package.research.events)} 个有效事件因子。"
+            "- 研究警告：" + "；".join(_markdown_cell(item) for item in package.research.warnings)
         )
     if package.research.events:
         lines.extend(
@@ -582,7 +586,11 @@ def render_summary_markdown(config: AppConfig, summary: AutomationSummary) -> st
             "",
             "| 标的 | 任务 | 原因 |",
             "|---|---|---|",
-            *[f"| {item['symbol']} | {item['task']} | {item['reason']} |" for item in failed_tasks],
+            *[
+                f"| {_markdown_cell(item['symbol'])} | {_markdown_cell(item['task'])} | "
+                f"{_markdown_cell(item['reason'])} |"
+                for item in failed_tasks
+            ],
         ]
     else:
         insert_at = lines.index("### 需要关注的失败任务") + 1
@@ -634,7 +642,8 @@ def render_task_log(summary: AutomationSummary) -> str:
         "| 标的 | 任务 | 状态 | 原因 |",
         "|---|---|---|---|",
         *[
-            f"| {item['symbol']} | {item['task']} | {item['status']} | {item['reason']} |"
+            f"| {_markdown_cell(item['symbol'])} | {_markdown_cell(item['task'])} | "
+            f"{_markdown_cell(item['status'])} | {_markdown_cell(item['reason'])} |"
             for item in summary.tasks
         ],
         "",

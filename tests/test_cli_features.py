@@ -69,7 +69,7 @@ name = "神火股份"
     assert captured["symbols"] == ["CN:601398", "CN:000933"]
     assert captured["use_llm"] is False
     assert captured["use_chronos"] is False
-    assert "自动分析完成：成功 2" in result.output
+    assert "自动分析完成：标的成功 2，标的失败 0" in result.output
 
 
 def test_cli_add_command_dry_run(tmp_path, monkeypatch) -> None:

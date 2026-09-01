@@ -8,7 +8,7 @@ import pandas as pd
 from stock_analysis.charts import render_probability_chart, render_stock_chart
 from stock_analysis.context import _news_items, refresh_news
 from stock_analysis.data import Database, DataQuality
-from stock_analysis.decision import AnalysisPackage, ValuationRange
+from stock_analysis.decision import AnalysisPackage, ValuationRange, render_analysis_markdown
 from stock_analysis.forecast import ForecastBundle, ForecastEstimate, ModelStatus
 from stock_analysis.indicators import (
     add_indicators,
@@ -263,3 +263,35 @@ def test_static_chart_is_generated(tmp_path) -> None:
     assert probability.exists()
     assert "80%" in probability.read_text(encoding="utf-8")
     assert "上涨概率" in probability.read_text(encoding="utf-8")
+
+
+def test_analysis_report_preserves_real_llm_degradation_reason() -> None:
+    package = AnalysisPackage(
+        symbol="CN:601318",
+        name="中国平安",
+        as_of=date(2025, 6, 17),
+        current_price=50.0,
+        currency="CNY",
+        data_quality=DataQuality.B,
+        data_warnings=[],
+        forecasts=[],
+        research=ResearchResult(
+            symbol="CN:601318",
+            as_of=date(2025, 6, 17),
+            status="degraded",
+            summary="LLM 调用失败，保留证据但不生成事件因子。",
+            warnings=["接口返回 401 Authorization Required\nMore | info"],
+        ),
+        technical=[],
+        quality=[],
+        valuation=[],
+        valuation_range=ValuationRange(available=False, method="fixture"),
+        decisions=[],
+    )
+
+    report = render_analysis_markdown(package)
+
+    assert "LLM 调用失败，保留证据但不生成事件因子" in report
+    assert "接口返回 401 Authorization Required" in report
+    assert "401 Authorization Required More \\| info" in report
+    assert "本次显式跳过 LLM" not in report
