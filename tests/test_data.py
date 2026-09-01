@@ -176,7 +176,26 @@ def test_latest_quote_falls_back_to_next_provider() -> None:
     )
 
     assert quote is not None and quote.price == 57.10
-    assert warnings == ["failed 实时报价失败（RuntimeError）"]
+    assert warnings == ["failed 实时报价不可用：RuntimeError；已尝试下一数据源"]
+
+
+def test_latest_quote_explains_json_provider_failure() -> None:
+    class JSONDecodeError(ValueError):
+        pass
+
+    class FailedProvider:
+        name = "akshare"
+
+        @staticmethod
+        def fetch_quote(_instrument):
+            raise JSONDecodeError("blocked")
+
+    quote, warnings = fetch_latest_quote(Instrument.parse("CN:601318"), [FailedProvider()])
+
+    assert quote is None
+    assert warnings == [
+        "akshare 实时报价不可用：接口返回非 JSON，可能被限流或网络拦截；已尝试下一数据源"
+    ]
 
 
 def test_akshare_converts_per_ten_share_corporate_actions(monkeypatch) -> None:

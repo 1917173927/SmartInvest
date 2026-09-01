@@ -1560,7 +1560,13 @@ def fetch_latest_quote(
             return fetch_quote(instrument), warnings
         except Exception as exc:
             name = str(getattr(provider, "name", type(provider).__name__))
-            warnings.append(f"{name} 实时报价失败（{type(exc).__name__}）")
+            if "JSONDecodeError" in type(exc).__name__:
+                reason = "接口返回非 JSON，可能被限流或网络拦截"
+            elif "Timeout" in type(exc).__name__:
+                reason = "请求超时"
+            else:
+                reason = type(exc).__name__
+            warnings.append(f"{name} 实时报价不可用：{reason}；已尝试下一数据源")
     return None, warnings
 
 
