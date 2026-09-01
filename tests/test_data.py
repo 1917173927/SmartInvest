@@ -31,14 +31,19 @@ from stock_analysis.data import (
 )
 
 
-def test_project_dotenv_loads_without_overriding_environment(tmp_path, monkeypatch) -> None:
+def test_project_dotenv_only_overrides_provider_environment(tmp_path, monkeypatch) -> None:
     (tmp_path / ".env").write_text(
-        "STOCK_ANALYSIS_TEST_KEY=from-file\nSTOCK_ANALYSIS_QUOTED='quoted'\n", encoding="utf-8"
+        "STOCK_ANALYSIS_TEST_KEY=from-file\n"
+        "STOCK_ANALYSIS_QUOTED='quoted'\n"
+        "OPENAI_API_KEY=project-key\n",
+        encoding="utf-8",
     )
     monkeypatch.setenv("STOCK_ANALYSIS_TEST_KEY", "from-env")
+    monkeypatch.setenv("OPENAI_API_KEY", "stale-shell-key")
     AppConfig.load(tmp_path)
     assert os.environ["STOCK_ANALYSIS_TEST_KEY"] == "from-env"
     assert os.environ["STOCK_ANALYSIS_QUOTED"] == "quoted"
+    assert os.environ["OPENAI_API_KEY"] == "project-key"
 
 
 def test_symbol_normalization() -> None:

@@ -25,6 +25,22 @@ from pydantic import BaseModel, Field, field_validator
 
 SCHEMA_VERSION = 1
 
+DOTENV_AUTHORITATIVE_KEYS = frozenset(
+    {
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "STOCK_ANALYSIS_MODEL",
+        "STOCK_ANALYSIS_EMBEDDING_MODEL",
+        "STOCK_ANALYSIS_EMBEDDING_BASE_URL",
+        "STOCK_ANALYSIS_EMBEDDING_API_KEY",
+        "GEMINI_API_KEY",
+        "GEMINI_EMBEDDING_MODEL",
+        "HF_HUB_DISABLE_XET",
+        "HF_TOKEN",
+        "SEC_USER_AGENT",
+    }
+)
+
 
 def utc_now() -> datetime:
     return datetime.now(tz=UTC)
@@ -48,7 +64,7 @@ def safe_filename_component(value: str) -> str:
 
 
 def _load_dotenv(root: Path) -> None:
-    """Load a minimal project .env without adding a runtime dependency."""
+    """Load project services deterministically without adding a dependency."""
     path = root / ".env"
     if not path.exists():
         return
@@ -59,7 +75,7 @@ def _load_dotenv(root: Path) -> None:
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
+        if key and (key in DOTENV_AUTHORITATIVE_KEYS or key not in os.environ):
             os.environ[key] = value
 
 

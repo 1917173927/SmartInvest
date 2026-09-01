@@ -191,6 +191,8 @@ uv run stock doctor
 LLM 还需要 `.env` 中有效的 API 凭据；Python 依赖安装无法修复接口返回的 401。
 LLM 与嵌入请求会对 DNS/连接错误、HTTP 429 和 5xx 进行有限指数退避重试；401 等配置错误
 不会重试。`SEC_USER_AGENT` 只有填写真实联系方式后才会在 `stock doctor` 中显示为可用。
+项目 `.env` 中的模型服务地址、模型名和凭据优先于终端中可能残留的同名环境变量，确保
+手动 CLI 与 launchd 使用同一套 Key；其他非服务变量仍保留系统环境优先级。
 
 ### 2. macOS 盘中行情：Longbridge OpenAPI
 
