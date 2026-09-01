@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import httpx
 import pytest
 
 from stock_analysis.data import AppConfig, Database
@@ -34,6 +35,53 @@ def test_gemini_embedding_configuration_is_supported(monkeypatch, tmp_path) -> N
     client = OpenAICompatibleClient(AppConfig(tmp_path, {}))
     assert client.embedding_available
     assert client.embedding_model == "gemini-embedding-001"
+
+
+def test_http_client_retries_transient_connection_failures(monkeypatch, tmp_path) -> None:
+    client = OpenAICompatibleClient(
+        AppConfig(
+            tmp_path,
+            {"research": {"retry_attempts": 3, "retry_backoff_seconds": 0}},
+        )
+    )
+    request = httpx.Request("POST", "https://example.test")
+    calls = 0
+
+    def flaky_post(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise httpx.ConnectError("temporary DNS failure", request=request)
+        return httpx.Response(200, request=request, json={"ok": True})
+
+    monkeypatch.setattr("stock_analysis.research.httpx.post", flaky_post)
+
+    response = client._post("https://example.test")
+
+    assert response.json() == {"ok": True}
+    assert calls == 3
+
+
+def test_http_client_does_not_retry_authentication_failures(monkeypatch, tmp_path) -> None:
+    client = OpenAICompatibleClient(
+        AppConfig(
+            tmp_path,
+            {"research": {"retry_attempts": 3, "retry_backoff_seconds": 0}},
+        )
+    )
+    request = httpx.Request("POST", "https://example.test")
+    calls = 0
+
+    def unauthorized(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401, request=request, json={"error": "invalid key"})
+
+    monkeypatch.setattr("stock_analysis.research.httpx.post", unauthorized)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        client._post("https://example.test")
+    assert calls == 1
 
 
 def test_json_parser_accepts_fenced_payload() -> None:

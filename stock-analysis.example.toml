@@ -31,6 +31,9 @@ minimum_calibration_samples = 100
 disable_after_consecutive_losses = 60
 
 [research]
+timeout_seconds = 90
+retry_attempts = 3
+retry_backoff_seconds = 0.5
 event_whitelist = [
   "earnings",
   "guidance",

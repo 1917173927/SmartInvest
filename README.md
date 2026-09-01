@@ -189,6 +189,8 @@ uv run stock doctor
 此后运行 `uv run stock auto` 时，uv 会先核对锁文件与默认依赖；行情、Chronos 和图表组件
 不再依赖额外的 `--extra` 参数。旧的 `data`、`forecast`、`charts` extra 名称仍保留兼容。
 LLM 还需要 `.env` 中有效的 API 凭据；Python 依赖安装无法修复接口返回的 401。
+LLM 与嵌入请求会对 DNS/连接错误、HTTP 429 和 5xx 进行有限指数退避重试；401 等配置错误
+不会重试。`SEC_USER_AGENT` 只有填写真实联系方式后才会在 `stock doctor` 中显示为可用。
 
 ### 2. macOS 盘中行情：Longbridge OpenAPI
 

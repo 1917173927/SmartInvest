@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from datetime import date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -150,7 +151,12 @@ class OpenAICompatibleClient:
             "STOCK_ANALYSIS_EMBEDDING_BASE_URL", self.base_url
         ).rstrip("/")
         self.embedding_api_key = os.getenv("STOCK_ANALYSIS_EMBEDDING_API_KEY", self.api_key)
-        self.timeout = float(config.section("research").get("timeout_seconds", 90))
+        research_config = config.section("research")
+        self.timeout = float(research_config.get("timeout_seconds", 90))
+        self.retry_attempts = max(1, int(research_config.get("retry_attempts", 3)))
+        self.retry_backoff_seconds = max(
+            0.0, float(research_config.get("retry_backoff_seconds", 0.5))
+        )
 
     @property
     def chat_available(self) -> bool:
@@ -166,11 +172,30 @@ class OpenAICompatibleClient:
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
+    def _post(self, url: str, **kwargs: Any) -> httpx.Response:
+        """Retry transient transport, rate-limit and server failures only."""
+        for attempt in range(self.retry_attempts):
+            try:
+                response = httpx.post(url, **kwargs)
+                response.raise_for_status()
+                return response
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status != 429 and status < 500:
+                    raise
+                if attempt + 1 >= self.retry_attempts:
+                    raise
+            except httpx.TransportError:
+                if attempt + 1 >= self.retry_attempts:
+                    raise
+            time.sleep(self.retry_backoff_seconds * (2**attempt))
+        raise RuntimeError("HTTP 重试流程异常结束")
+
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not self.embedding_available:
             raise RuntimeError("未配置嵌入模型")
         if self.gemini_api_key and self.gemini_embedding_model:
-            response = httpx.post(
+            response = self._post(
                 "https://generativelanguage.googleapis.com/v1beta/models/"
                 f"{self.gemini_embedding_model}:batchEmbedContents",
                 params={"key": self.gemini_api_key},
@@ -185,11 +210,10 @@ class OpenAICompatibleClient:
                 },
                 timeout=self.timeout,
             )
-            response.raise_for_status()
             return [
                 [float(value) for value in item["values"]] for item in response.json()["embeddings"]
             ]
-        response = httpx.post(
+        response = self._post(
             f"{self.embedding_base_url}/embeddings",
             headers={
                 "Authorization": f"Bearer {self.embedding_api_key}",
@@ -198,7 +222,6 @@ class OpenAICompatibleClient:
             json={"model": self.embedding_model, "input": texts},
             timeout=self.timeout,
         )
-        response.raise_for_status()
         payload = response.json()
         ordered = sorted(payload["data"], key=lambda item: int(item["index"]))
         return [[float(value) for value in item["embedding"]] for item in ordered]
@@ -243,7 +266,7 @@ commodity, capital_allocation。
 没有足够证据时 events 返回空数组。以下是唯一可用证据：
 {evidence_text}
 """.strip()
-        response = httpx.post(
+        response = self._post(
             f"{self.base_url}/chat/completions",
             headers=self.headers,
             json={
@@ -256,7 +279,6 @@ commodity, capital_allocation。
             },
             timeout=self.timeout,
         )
-        response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"]
         return _parse_json_object(content)
 

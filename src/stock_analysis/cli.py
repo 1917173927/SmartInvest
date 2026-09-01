@@ -413,8 +413,10 @@ def doctor() -> None:
         ),
         (
             "SEC User-Agent",
-            "OK" if os.getenv("SEC_USER_AGENT") else "OPTIONAL",
-            "美股 SEC 财务事实需要联系人标识",
+            "OK"
+            if os.getenv("SEC_USER_AGENT") and "example.com" not in os.getenv("SEC_USER_AGENT", "")
+            else "OPTIONAL",
+            "美股 SEC 财务事实需要真实联系人标识",
         ),
         (
             "HF Hub Token",
