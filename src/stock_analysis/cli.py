@@ -160,6 +160,18 @@ def _prompt_auto_options(
     return selected, use_llm, use_chronos
 
 
+def _auto_interactive_enabled(
+    requested: bool | None,
+    *,
+    has_symbols: bool,
+    verbose: bool,
+    is_terminal: bool,
+) -> bool:
+    if requested is not None:
+        return requested
+    return is_terminal and not has_symbols and not verbose
+
+
 def _run_automation_with_progress(
     config: AppConfig,
     *,
@@ -525,9 +537,13 @@ def auto_command(
         typer.Option("--symbol", "-s", help="只分析指定配置标的；可重复传入"),
     ] = None,
     interactive: Annotated[
-        bool,
-        typer.Option("--interactive", "-i", help="在 CLI 菜单中选择标的范围和分析模式"),
-    ] = False,
+        bool | None,
+        typer.Option(
+            "--interactive/--no-interactive",
+            "-i",
+            help="是否显示选择菜单；终端直接运行且未指定标的时默认开启",
+        ),
+    ] = None,
     show_progress: Annotated[
         bool | None,
         typer.Option(
@@ -538,9 +554,15 @@ def auto_command(
 ) -> None:
     """按顺序运行全标的或自选标的的同步、分析、回执与组合检查。"""
     config = AppConfig.load()
-    if interactive and symbols:
+    interactive_enabled = _auto_interactive_enabled(
+        interactive,
+        has_symbols=bool(symbols),
+        verbose=verbose,
+        is_terminal=console.is_terminal,
+    )
+    if interactive_enabled and symbols:
         raise typer.BadParameter("--interactive 不能与 --symbol 同时使用")
-    if interactive:
+    if interactive_enabled:
         selected, use_llm, use_chronos = _prompt_auto_options(config, use_llm, use_chronos)
     else:
         selected = _resolve_auto_symbols(config, symbols)

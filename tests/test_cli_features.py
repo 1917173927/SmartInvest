@@ -7,7 +7,7 @@ import pandas as pd
 from typer.testing import CliRunner
 
 from stock_analysis.automation import AutomationSummary
-from stock_analysis.cli import _quote_freshness, app
+from stock_analysis.cli import _auto_interactive_enabled, _quote_freshness, app
 from stock_analysis.data import Bar, Database, DataQuality, FundamentalRecord, MarketQuote
 
 runner = CliRunner()
@@ -20,6 +20,15 @@ def test_quote_freshness_rejects_stale_public_snapshot() -> None:
 
     assert not fresh
     assert warning is not None and "超过 15 分钟" in warning
+
+
+def test_cli_auto_defaults_to_menu_only_in_interactive_terminal() -> None:
+    assert _auto_interactive_enabled(None, has_symbols=False, verbose=False, is_terminal=True)
+    assert not _auto_interactive_enabled(None, has_symbols=False, verbose=False, is_terminal=False)
+    assert not _auto_interactive_enabled(None, has_symbols=True, verbose=False, is_terminal=True)
+    assert not _auto_interactive_enabled(None, has_symbols=False, verbose=True, is_terminal=True)
+    assert not _auto_interactive_enabled(False, has_symbols=False, verbose=False, is_terminal=True)
+    assert _auto_interactive_enabled(True, has_symbols=False, verbose=False, is_terminal=False)
 
 
 def test_cli_auto_interactive_selects_symbols_and_quick_mode(tmp_path, monkeypatch) -> None:

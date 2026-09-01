@@ -102,18 +102,21 @@
 1. **自动触发**：macOS 守护进程于 18:30 自动执行 `stock auto`。
 2. **手动启动与 CLI 选择**：
    ```bash
-   # 菜单模式：选择全部/部分标的，以及按配置/快速/完整模式
-   uv run stock auto --interactive
-
-   # 直接按 stock-analysis.toml 顺序轮流分析全部配置标的
+   # 终端直接运行时默认进入菜单：选择全部/部分标的，以及运行模式
    uv run stock auto
+
+   # 跳过菜单，直接按配置顺序轮流分析全部标的
+   uv run stock auto --no-interactive
 
    # 非交互地只分析指定标的；--symbol 可重复
    uv run stock auto --symbol CN:601318 --symbol CN:601398
 
    # 快速模式：保留确定性分析，关闭 LLM 与 Chronos
-   uv run stock auto --no-llm --no-chronos
+   uv run stock auto --no-interactive --no-llm --no-chronos
    ```
+   `-i` 是 `--interactive` 的缩写，通常无需再写；仅在管道或其他非交互环境中需要强制
+   打开菜单时使用。指定 `--symbol`、启用 `--verbose`，或在 launchd/cron 中运行时，菜单
+   默认关闭，避免后台任务等待输入。
    在交互终端中默认显示“预检 → 逐只同步 → 回执 → 校准状态 → 逐只分析 → 组合报告”
    总进度条；可用 `--progress` 强制显示或 `--no-progress` 关闭。
 3. **全部轮流分析口径**：
