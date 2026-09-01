@@ -143,8 +143,9 @@ def _execution_guidance(
 ) -> str:
     if not actionable:
         return (
-            "[bold red]当前动作：暂停下单。[/bold red] 实时报价不可用；先在券商核对现价，"
-            "再用 [bold]--price 券商现价[/bold] 重新运行。"
+            "[bold red]当前动作：暂停下单。[/bold red] 实时报价不可用或已过期；检查 "
+            "[bold]longbridge auth status[/bold] 与报价时间，并在券商盘口复核。人工 "
+            "[bold]--price[/bold] 只供离线测算，不能恢复执行判断。"
         )
     if len(plan.tiers) < 3:
         return "[bold red]当前动作：暂停下单。[/bold red] 未生成完整三档计划。"
@@ -1148,7 +1149,7 @@ def size_command(
     ] = None,
     price: Annotated[
         float | None,
-        typer.Option(help="券商盘中现价；优先级高于网络报价，用于下单前人工核对"),
+        typer.Option(help="离线复现价格；人工输入不视为实时行情，也不会恢复执行判断"),
     ] = None,
     held_shares: Annotated[
         int | None,
@@ -1195,7 +1196,9 @@ def size_command(
             database.close()
             raise typer.BadParameter("--price 必须大于 0")
         current_price = price
-        price_source = "券商现价（手工输入）"
+        price_source = "人工输入价格（未由系统验证，仅供复现/测算）"
+        quote_actionable = False
+        quote_warnings.append("人工输入价格不是系统获取的实时数据；仅供测算，暂停执行判断")
     else:
         quote, quote_warnings = fetch_latest_quote(instrument)
         if quote is not None:

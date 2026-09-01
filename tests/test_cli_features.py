@@ -7,7 +7,7 @@ import pandas as pd
 from typer.testing import CliRunner
 
 from stock_analysis.cli import _quote_freshness, app
-from stock_analysis.data import Bar, Database, DataQuality, FundamentalRecord
+from stock_analysis.data import Bar, Database, DataQuality, FundamentalRecord, MarketQuote
 
 runner = CliRunner()
 
@@ -189,6 +189,18 @@ cn_account_assets_as_of = "2026-09-01"
         encoding="utf-8",
     )
     monkeypatch.setenv("STOCK_ANALYSIS_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "stock_analysis.cli.fetch_latest_quote",
+        lambda _instrument: (
+            MarketQuote(
+                symbol="CN:601318",
+                price=57.10,
+                currency="CNY",
+                source="fixture-quote",
+            ),
+            [],
+        ),
+    )
     db_path = tmp_path / ".stock-analysis" / "analysis.sqlite3"
 
     with Database(db_path) as db:
@@ -233,7 +245,7 @@ cn_account_assets_as_of = "2026-09-01"
 
     result = runner.invoke(
         app,
-        ["size", "CN:601318", "--price", "57.10", "--target-weight", "0.20"],
+        ["size", "CN:601318", "--target-weight", "0.20"],
         env={"COLUMNS": "160"},
     )
     assert result.exit_code == 0
@@ -245,6 +257,16 @@ cn_account_assets_as_of = "2026-09-01"
     assert "账户总资产: 51,546.80 CNY" in result.output
     assert "当前持仓: 300 股" in result.output
     assert "当前动作：不新增买入" in result.output
+
+    manual_result = runner.invoke(
+        app,
+        ["size", "CN:601318", "--price", "57.10", "--target-weight", "0.20"],
+        env={"COLUMNS": "160"},
+    )
+    assert manual_result.exit_code == 0
+    assert "人工输入价格（未由系统验证，仅供复现/测算）" in manual_result.output
+    assert "人工输入价格不是系统获取的实时数据" in manual_result.output
+    assert "当前动作：暂停下单" in manual_result.output
 
 
 def test_cli_compare_command(tmp_path, monkeypatch) -> None:

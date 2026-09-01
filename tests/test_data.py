@@ -4,6 +4,7 @@ import os
 import sqlite3
 import sys
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -15,6 +16,7 @@ from stock_analysis.data import (
     CorporateAction,
     Database,
     Instrument,
+    LongbridgeQuoteProvider,
     Market,
     MarketQuote,
     TencentQuoteProvider,
@@ -23,6 +25,7 @@ from stock_analysis.data import (
     coverage_warnings,
     fetch_latest_quote,
     quality_summary,
+    quote_provider_order,
     sync_symbol,
     total_return_frame,
 )
@@ -174,6 +177,83 @@ def test_tencent_fetches_timestamped_quote(monkeypatch) -> None:
     assert quote.fetched_at.isoformat() == "2026-09-01T12:05:39+08:00"
 
 
+def test_longbridge_fetches_quote_with_intraday_timestamp(monkeypatch) -> None:
+    responses = iter(
+        [
+            '[{"symbol":"601318.SH","last":"57.30","status":"Normal"}]',
+            '[{"time":"2026-09-01T06:02:00Z","price":"57.30"},'
+            '{"time":"2026-09-01T06:03:00Z","price":"57.30"}]',
+        ]
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        assert kwargs == {
+            "check": False,
+            "capture_output": True,
+            "text": True,
+            "timeout": 12,
+        }
+        return SimpleNamespace(returncode=0, stdout=next(responses), stderr="")
+
+    monkeypatch.setattr(
+        "stock_analysis.data._longbridge_executable", lambda: "/opt/homebrew/bin/longbridge"
+    )
+    monkeypatch.setattr("stock_analysis.data.subprocess.run", fake_run)
+
+    quote = LongbridgeQuoteProvider().fetch_quote(Instrument.parse("CN:601318"))
+
+    assert quote.price == 57.30
+    assert quote.source == "longbridge-openapi"
+    assert quote.fetched_at == datetime(2026, 9, 1, 6, 3, tzinfo=UTC)
+    assert calls == [
+        [
+            "/opt/homebrew/bin/longbridge",
+            "quote",
+            "601318.SH",
+            "--format",
+            "json",
+        ],
+        [
+            "/opt/homebrew/bin/longbridge",
+            "intraday",
+            "601318.SH",
+            "--format",
+            "json",
+        ],
+    ]
+
+
+def test_longbridge_is_first_a_share_quote_provider() -> None:
+    providers = quote_provider_order(Instrument.parse("CN:601318"))
+
+    assert isinstance(providers[0], LongbridgeQuoteProvider)
+    assert isinstance(providers[1], TencentQuoteProvider)
+
+
+def test_longbridge_auth_failure_is_actionable(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "stock_analysis.data._longbridge_executable", lambda: "/opt/homebrew/bin/longbridge"
+    )
+    monkeypatch.setattr(
+        "stock_analysis.data.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="authentication token not found; run longbridge auth login",
+        ),
+    )
+
+    quote, warnings = fetch_latest_quote(Instrument.parse("CN:601318"), [LongbridgeQuoteProvider()])
+
+    assert quote is None
+    assert warnings == [
+        "longbridge-openapi 实时报价不可用：Longbridge CLI 未登录；"
+        "请运行 longbridge auth login；已尝试下一数据源"
+    ]
+
+
 def test_latest_quote_falls_back_to_next_provider() -> None:
     class FailedProvider:
         name = "failed"
@@ -200,6 +280,41 @@ def test_latest_quote_falls_back_to_next_provider() -> None:
 
     assert quote is not None and quote.price == 57.10
     assert warnings == ["failed 实时报价不可用：RuntimeError；已尝试下一数据源"]
+
+
+def test_latest_quote_skips_stale_provider() -> None:
+    class StaleProvider:
+        name = "stale"
+
+        @staticmethod
+        def fetch_quote(instrument):
+            return MarketQuote(
+                symbol=instrument.canonical,
+                price=57.10,
+                currency="CNY",
+                source="stale-quote",
+                fetched_at=datetime.now(tz=UTC) - timedelta(minutes=16),
+            )
+
+    class FreshProvider:
+        name = "fresh"
+
+        @staticmethod
+        def fetch_quote(instrument):
+            return MarketQuote(
+                symbol=instrument.canonical,
+                price=57.31,
+                currency="CNY",
+                source="fresh-quote",
+            )
+
+    quote, warnings = fetch_latest_quote(
+        Instrument.parse("CN:601318"), [StaleProvider(), FreshProvider()]
+    )
+
+    assert quote is not None and quote.price == 57.31
+    assert warnings[0].startswith("stale 报价已超过 15 分钟")
+    assert warnings[0].endswith("已尝试下一数据源")
 
 
 def test_latest_quote_explains_json_provider_failure() -> None:

@@ -5,7 +5,9 @@ import json
 import math
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
 import tomllib
 from collections.abc import Iterable, Sequence
 from contextlib import suppress
@@ -1582,6 +1584,112 @@ class TencentQuoteProvider:
         return _parse_tencent_quote(text, instrument)
 
 
+def _longbridge_executable() -> str | None:
+    """Resolve the official CLI without relying on an interactive shell PATH."""
+    configured = os.getenv("STOCK_ANALYSIS_LONGBRIDGE_CLI")
+    candidates = [
+        configured,
+        shutil.which("longbridge"),
+        "/opt/homebrew/bin/longbridge",
+        "/usr/local/bin/longbridge",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _longbridge_rows(output: str, command: str) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Longbridge {command} 未返回有效 JSON") from exc
+    if not isinstance(payload, list):
+        raise RuntimeError(f"Longbridge {command} 响应结构不兼容")
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _longbridge_time(value: Any) -> datetime:
+    if isinstance(value, (int, float)) or (isinstance(value, str) and value.isdigit()):
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000
+        return datetime.fromtimestamp(timestamp, tz=UTC)
+    if not isinstance(value, str):
+        raise RuntimeError("Longbridge 分时数据缺少有效时间")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError("Longbridge 分时数据时间格式不兼容") from exc
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+
+
+class LongbridgeQuoteProvider:
+    """Read an A-share snapshot from the authenticated, read-only Longbridge CLI."""
+
+    name = "longbridge-openapi"
+
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.market is Market.CN
+
+    @staticmethod
+    def _symbol(instrument: Instrument) -> str:
+        suffix = "SH" if instrument.code.startswith(("5", "6", "9")) else "SZ"
+        return f"{instrument.code}.{suffix}"
+
+    @staticmethod
+    def _run(executable: str, arguments: list[str], command: str) -> list[dict[str, Any]]:
+        try:
+            completed = subprocess.run(
+                [executable, *arguments, "--format", "json"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=12,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"Longbridge {command} 请求超时") from exc
+        if completed.returncode != 0:
+            detail = f"{completed.stderr}\n{completed.stdout}".lower()
+            if "auth" in detail or "token" in detail or "login" in detail:
+                raise RuntimeError("Longbridge CLI 未登录；请运行 longbridge auth login")
+            raise RuntimeError(f"Longbridge {command} 请求失败")
+        return _longbridge_rows(completed.stdout, command)
+
+    def fetch_quote(self, instrument: Instrument) -> MarketQuote:
+        if not self.supports(instrument):
+            raise ValueError("Longbridge 实时报价当前只接入 A 股")
+        executable = _longbridge_executable()
+        if executable is None:
+            raise RuntimeError("未安装 Longbridge CLI")
+        symbol = self._symbol(instrument)
+        quotes = self._run(executable, ["quote", symbol], "quote")
+        quote = next((item for item in quotes if item.get("symbol") == symbol), None)
+        if quote is None:
+            raise RuntimeError("Longbridge quote 未返回目标证券")
+        price = _number(quote.get("last", quote.get("last_done")), -1)
+        if price <= 0:
+            raise RuntimeError("Longbridge quote 缺少有效最新价")
+        status = str(quote.get("status", quote.get("trade_status", "Normal")))
+        if status.lower() not in {"normal", "trading"}:
+            raise RuntimeError(f"Longbridge 返回不可执行的交易状态：{status}")
+
+        intraday = self._run(executable, ["intraday", symbol], "intraday")
+        if not intraday:
+            raise RuntimeError("Longbridge intraday 未返回分时数据")
+        quote_times = [
+            _longbridge_time(item.get("time", item.get("timestamp"))) for item in intraday
+        ]
+        return MarketQuote(
+            symbol=instrument.canonical,
+            price=price,
+            currency=instrument.currency,
+            source="longbridge-openapi",
+            fetched_at=max(quote_times),
+            quality=DataQuality.B,
+        )
+
+
 def provider_order(instrument: Instrument) -> list[MarketDataProvider]:
     akshare = AkShareProvider()
     yahoo = YFinanceProvider()
@@ -1594,7 +1702,12 @@ def provider_order(instrument: Instrument) -> list[MarketDataProvider]:
 
 def quote_provider_order(instrument: Instrument) -> list[object]:
     if instrument.market is Market.CN:
-        return [TencentQuoteProvider(), AkShareProvider(), YFinanceProvider()]
+        return [
+            LongbridgeQuoteProvider(),
+            TencentQuoteProvider(),
+            AkShareProvider(),
+            YFinanceProvider(),
+        ]
     if instrument.market is Market.HK:
         return [AkShareProvider(), YFinanceProvider()]
     return [YFinanceProvider()]
@@ -1612,13 +1725,26 @@ def fetch_latest_quote(
         if fetch_quote is None:
             continue
         try:
-            return fetch_quote(instrument), warnings
+            quote = fetch_quote(instrument)
+            age = utc_now() - quote.fetched_at.astimezone(UTC)
+            if age > timedelta(minutes=15):
+                name = str(getattr(provider, "name", type(provider).__name__))
+                quoted_at = quote.fetched_at.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+                warnings.append(f"{name} 报价已超过 15 分钟（{quoted_at}）；已尝试下一数据源")
+                continue
+            if age < -timedelta(minutes=2):
+                name = str(getattr(provider, "name", type(provider).__name__))
+                warnings.append(f"{name} 报价时间晚于本机时间；已尝试下一数据源")
+                continue
+            return quote, warnings
         except Exception as exc:
             name = str(getattr(provider, "name", type(provider).__name__))
             if "JSONDecodeError" in type(exc).__name__:
                 reason = "接口返回非 JSON，可能被限流或网络拦截"
             elif "Timeout" in type(exc).__name__:
                 reason = "请求超时"
+            elif name == "longbridge-openapi":
+                reason = str(exc) or type(exc).__name__
             else:
                 reason = type(exc).__name__
             warnings.append(f"{name} 实时报价不可用：{reason}；已尝试下一数据源")

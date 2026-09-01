@@ -78,19 +78,21 @@
 1. **纪律原则**：盘中由券商系统自动触发条件单被动成交，**严禁盯盘追涨杀跌**。
 2. **盘中仓位复核**：
    ```bash
-   # 自动读取配置中的账户总资产和已有持仓，并尝试获取盘中报价
+   # 自动读取配置中的账户总资产和已有持仓，并优先尝试 Longbridge 盘中报价
    uv run stock size CN:601318
 
-   # 下单前以券商显示值覆盖网络报价或临时持仓
-   uv run stock size CN:601318 --price 57.10 --held-shares 300
+   # 持仓尚未写回配置时，可临时覆盖当前持股数
+   uv run stock size CN:601318 --held-shares 300
 
    # 基本面敏感性推演
    uv run stock scenario CN:601318 --margin-delta 0.05
    ```
 3. **执行口径**：
    - `盘中执行价` 只用于判断当前是否触发，以及估算已有持仓市值；
-   - 公开行情源会显示来源和报价时间；报价超过 15 分钟时只作参考，系统会暂停下单判断；
-   - 真正下单应以券商当前盘口为准，并用 `--price` 输入券商现价覆盖公开源；
+   - 行情源依次为 Longbridge OpenAPI、腾讯、AKShare、Yahoo，并显示实际来源和报价时间；
+   - 报价超过 15 分钟或数据源失败时只作参考，系统会暂停下单判断；
+   - `--price` 是离线复现参数，人工价格不再被标成券商实时行情，也不能恢复执行判断；
+   - 真正下单前仍需在券商盘口核对买一/卖一、可用资金和已成交数量；
    - 三档挂单价继续锚定已完成的日线分析基准，不随盘中上涨而抬高；
    - `--capital` 表示账户总资产，不是可用现金；可用现金需在券商端另行核验；
    - 已有仓位达到目标上限时，系统输出 0 股并明确提示“不新增买入”。
@@ -125,7 +127,7 @@
 | 命令                       | 用途与核心参数                                                                                 |
 | -------------------------- | ---------------------------------------------------------------------------------------------- |
 | `stock morning`          | 🌅**盘前挂单晨报**：输出全标的 3 阶挂单价、建议手数与止损线（支持桌面弹窗）              |
-| `stock size SYMBOL`      | 🎯**实盘仓位精算器**：读取总资产和已有持仓，获取盘中报价并输出条件动作；支持 `--price`、`--held-shares` 覆盖 |
+| `stock size SYMBOL`      | 🎯**实盘仓位精算器**：读取总资产和已有持仓，优先获取 Longbridge 盘中报价并输出条件动作；支持 `--held-shares` 覆盖 |
 | `stock compare S1 S2...` | ⚖️**跨标的比对矩阵**：横向比对估值折扣、多周期信号与优先建仓排序                       |
 | `stock dash`             | 📊**终端决策看板**：基于本地日线数据呈现全资产四周期信号、数据日期与质量                  |
 | `stock scenario SYMBOL`  | 🔬**What-If 情景推演**：模拟盈利预期调整与安全边际变化对买入价的影响                     |
@@ -158,6 +160,38 @@ uv sync --extra data --extra forecast --extra charts --extra dev
 uv run stock doctor
 ```
 
+### 2. macOS 盘中行情：Longbridge OpenAPI
+
+本项目只调用 Longbridge 的只读行情命令，不调用资产、持仓或交易接口。OpenAPI 令牌由官方
+CLI 保存在用户目录，不写入仓库或 `stock-analysis.toml`。
+
+```bash
+# 安装官方 CLI；新版 Homebrew 首次使用第三方 tap 时需要显式信任该 cask
+brew tap longbridge/tap
+brew trust --cask longbridge/tap/longbridge-terminal
+brew install --cask longbridge-terminal
+
+# 浏览器 OAuth 授权并核验状态
+longbridge auth login --client-name SmartInvest
+longbridge auth status
+
+# 独立验证中国平安行情
+longbridge quote 601318.SH --format json
+longbridge intraday 601318.SH --format json
+```
+
+正常测算无需输入价格：
+
+```bash
+uv run stock size CN:601318
+```
+
+系统使用 `quote` 获取最新价，并以 `intraday` 返回的最新分钟时间校验新鲜度。CLI 未安装、
+未登录、行情不可用或报价超过 15 分钟时自动尝试下一数据源；所有来源都失败时使用历史日线
+且暂停执行判断。`longbridge auth status` 若显示 `CN_Basic / 15-min Delay`，代表当前账户没有
+A 股实时权限，系统不会把这档行情标成实时。本机本次授权即为该延迟权限，需在 Longbridge
+开通实时权限或使用中国大陆网络后重新核验。
+
 首次实盘测算前，必须在本地 `stock-analysis.toml` 填写真实账户资产和当前持股数：
 
 ```toml
@@ -174,7 +208,7 @@ current_shares = 300
 真实配置已被 Git 忽略。账户资产或持仓变化后应及时更新；也可在单次测算中使用
 `--capital`、`--held-shares` 临时覆盖。
 
-### 2. macOS 后台自动化守护进程一键安装
+### 3. macOS 后台自动化守护进程一键安装
 
 运行自带的配置脚本，会自动在 macOS 系统中注册两大无缝定时守护进程：
 

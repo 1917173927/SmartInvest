@@ -3,7 +3,7 @@
 ## 数据流
 
 ```text
-AKShare / 东方财富 / yfinance / SEC
+Longbridge（只读盘中报价）/ 腾讯 / AKShare / 东方财富 / yfinance / SEC
           │
           ▼
 data：原始行情、公司行动、财务事实、新闻/宏观、时间点校验、SQLite
@@ -25,7 +25,7 @@ decision：质量、估值、多因素评分、安全边际、硬约束、多周
 
 `src/stock_analysis` 保留五个核心职责，并用三个小型支持模块隔离可选能力：
 
-- `data.py`：唯一的数据与持久化边界。
+- `data.py`：唯一的数据与持久化边界；Longbridge CLI 仅用于读取行情，不读取账户或调用交易接口。
 - `forecast.py`：概率预测、集成权重、回执评估与 walk-forward。
 - `research.py`：证据入库、全文/向量检索、LLM 事件校验。
 - `decision.py`：确定性规则、风险门槛、组合解析和报告模型。
@@ -57,4 +57,4 @@ decision：质量、估值、多因素评分、安全边际、硬约束、多周
 
 ## 明确不做
 
-v1 不做全市场扫描、盘中分钟线、网页界面、模型微调、强化学习、多 Agent、TimesFM、独立向量数据库、券商连接或自动下单。操作系统定时器只负责启动 `stock auto`，不进入核心业务层。
+v1 不做全市场扫描、盘中分钟线存储、网页界面、模型微调、强化学习、多 Agent、TimesFM、独立向量数据库、券商账户连接或自动下单。Longbridge 分时数据只用于校验当前报价时间，不写入历史数据库；操作系统定时器只负责启动 `stock auto`，不进入核心业务层。
