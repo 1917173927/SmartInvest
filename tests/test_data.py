@@ -189,12 +189,8 @@ def test_longbridge_fetches_quote_with_intraday_timestamp(monkeypatch) -> None:
 
     def fake_run(command, **kwargs):
         calls.append(command)
-        assert kwargs == {
-            "check": False,
-            "capture_output": True,
-            "text": True,
-            "timeout": 12,
-        }
+        assert kwargs.pop("env")["LONGBRIDGE_REGION"] == "cn"
+        assert kwargs == {"check": False, "capture_output": True, "text": True, "timeout": 12}
         return SimpleNamespace(returncode=0, stdout=next(responses), stderr="")
 
     monkeypatch.setattr(

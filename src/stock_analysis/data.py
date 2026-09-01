@@ -1639,11 +1639,14 @@ class LongbridgeQuoteProvider:
 
     @staticmethod
     def _run(executable: str, arguments: list[str], command: str) -> list[dict[str, Any]]:
+        environment = os.environ.copy()
+        environment.setdefault("LONGBRIDGE_REGION", "cn")
         try:
             completed = subprocess.run(
                 [executable, *arguments, "--format", "json"],
                 check=False,
                 capture_output=True,
+                env=environment,
                 text=True,
                 timeout=12,
             )
