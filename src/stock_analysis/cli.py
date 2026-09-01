@@ -1289,7 +1289,7 @@ def morning_command(
     notify: Annotated[bool, typer.Option(help="是否发送 macOS 桌面弹窗通知")] = True,
 ) -> None:
     """生成 09:15 集合竞价前券商 App 预埋单/条件单晨报并输出挂单网格。"""
-    config, _ = _context()
+    config = AppConfig.load()
     brief = generate_morning_brief(config, total_capital=capital, send_notification=notify)
     console.print("\n[bold green]🌅 盘前挂单与执行晨报已生成！[/bold green]")
     console.print(f"报告路径: [bold cyan]{brief.report_path}[/bold cyan]")
