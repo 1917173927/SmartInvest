@@ -10,9 +10,18 @@ from typing import Annotated
 import pandas as pd
 import typer
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.table import Table
 
 from stock_analysis.automation import (
+    AutomationProgress,
     configured_symbols,
     organize_reports,
     run_automation,
@@ -81,6 +90,110 @@ def _parse_date(value: str | None, fallback: date) -> date:
         return date.fromisoformat(value) if value else fallback
     except ValueError as exc:
         raise typer.BadParameter("日期格式应为 YYYY-MM-DD") from exc
+
+
+def _resolve_auto_symbols(config: AppConfig, requested: list[str] | None) -> list[str]:
+    available = configured_symbols(config)
+    if not available:
+        raise typer.BadParameter("stock-analysis.toml 未配置任何可分析标的")
+    if not requested:
+        return available
+    selected: list[str] = []
+    for raw_symbol in requested:
+        try:
+            symbol = Instrument.parse(raw_symbol).canonical
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        if symbol not in available:
+            raise typer.BadParameter(f"{symbol} 不在 stock-analysis.toml 的 assets 中")
+        if symbol not in selected:
+            selected.append(symbol)
+    return selected
+
+
+def _prompt_auto_options(
+    config: AppConfig,
+    use_llm: bool | None,
+    use_chronos: bool | None,
+) -> tuple[list[str], bool | None, bool | None]:
+    available = _resolve_auto_symbols(config, None)
+    table = Table(title="自动分析标的")
+    table.add_column("序号", justify="right")
+    table.add_column("代码")
+    table.add_column("名称")
+    for index, symbol in enumerate(available, start=1):
+        table.add_row(str(index), symbol, str(config.asset(symbol).get("name", symbol)))
+    console.print(table)
+
+    scope = typer.prompt("选择范围：1=全部轮流分析，2=自选标的", default="1").strip()
+    if scope == "1":
+        selected = available
+    elif scope == "2":
+        raw_indexes = typer.prompt("输入序号，多个用逗号分隔（例如 1,3,5）")
+        try:
+            indexes = [int(value.strip()) for value in raw_indexes.split(",") if value.strip()]
+        except ValueError as exc:
+            raise typer.BadParameter("标的序号必须是整数") from exc
+        if not indexes or any(index < 1 or index > len(available) for index in indexes):
+            raise typer.BadParameter(f"标的序号应在 1 到 {len(available)} 之间")
+        selected = []
+        for index in indexes:
+            symbol = available[index - 1]
+            if symbol not in selected:
+                selected.append(symbol)
+    else:
+        raise typer.BadParameter("范围只能选择 1 或 2")
+
+    if use_llm is None and use_chronos is None:
+        mode = typer.prompt(
+            "选择模式：1=按配置，2=快速（关闭 LLM/Chronos），3=完整（启用 LLM/Chronos）",
+            default="1",
+        ).strip()
+        if mode == "2":
+            use_llm = False
+            use_chronos = False
+        elif mode == "3":
+            use_llm = True
+            use_chronos = True
+        elif mode != "1":
+            raise typer.BadParameter("模式只能选择 1、2 或 3")
+    return selected, use_llm, use_chronos
+
+
+def _run_automation_with_progress(
+    config: AppConfig,
+    *,
+    symbols: list[str],
+    use_llm: bool | None,
+    use_chronos: bool | None,
+):
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("准备自动分析", total=len(symbols) * 2 + 3)
+
+        def update(event: AutomationProgress) -> None:
+            subject = f" {event.symbol}" if event.symbol else ""
+            detail = f" · {event.detail}" if event.detail else ""
+            progress.update(
+                task_id,
+                completed=event.completed,
+                total=event.total,
+                description=f"{event.stage}{subject}{detail}",
+            )
+
+        return run_automation(
+            config,
+            symbols=symbols,
+            use_llm=use_llm,
+            use_chronos=use_chronos,
+            progress_callback=update,
+        )
 
 
 def _write_report(
@@ -407,11 +520,48 @@ def auto_command(
         bool,
         typer.Option("--verbose", help="输出完整任务 JSON；默认只显示重要摘要"),
     ] = False,
+    symbols: Annotated[
+        list[str] | None,
+        typer.Option("--symbol", "-s", help="只分析指定配置标的；可重复传入"),
+    ] = None,
+    interactive: Annotated[
+        bool,
+        typer.Option("--interactive", "-i", help="在 CLI 菜单中选择标的范围和分析模式"),
+    ] = False,
+    show_progress: Annotated[
+        bool | None,
+        typer.Option(
+            "--progress/--no-progress",
+            help="显示总进度；交互终端默认开启，后台与 JSON 输出默认关闭",
+        ),
+    ] = None,
 ) -> None:
-    """无交互运行同步、分析、回执核对和组合检查。"""
+    """按顺序运行全标的或自选标的的同步、分析、回执与组合检查。"""
     config = AppConfig.load()
+    if interactive and symbols:
+        raise typer.BadParameter("--interactive 不能与 --symbol 同时使用")
+    if interactive:
+        selected, use_llm, use_chronos = _prompt_auto_options(config, use_llm, use_chronos)
+    else:
+        selected = _resolve_auto_symbols(config, symbols)
+    progress_enabled = (
+        show_progress if show_progress is not None else console.is_terminal and not verbose
+    )
     try:
-        summary = run_automation(config, use_llm=use_llm, use_chronos=use_chronos)
+        if progress_enabled:
+            summary = _run_automation_with_progress(
+                config,
+                symbols=selected,
+                use_llm=use_llm,
+                use_chronos=use_chronos,
+            )
+        else:
+            summary = run_automation(
+                config,
+                symbols=selected,
+                use_llm=use_llm,
+                use_chronos=use_chronos,
+            )
     except Exception as exc:
         console.print(f"[red]自动运行失败：{exc}[/red]")
         raise typer.Exit(1) from exc

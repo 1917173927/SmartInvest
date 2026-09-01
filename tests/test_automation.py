@@ -45,7 +45,8 @@ def test_unattended_run_uses_cache_without_network(tmp_path) -> None:
                 for timestamp, price in zip(dates, prices, strict=True)
             ]
         )
-    summary = run_automation(config, as_of=as_of)
+    progress = []
+    summary = run_automation(config, as_of=as_of, progress_callback=progress.append)
     assert summary.succeeded == ["CN:601318"]
     assert not summary.failed
     assert (
@@ -63,6 +64,10 @@ def test_unattended_run_uses_cache_without_network(tmp_path) -> None:
     assert run["status"] == "completed"
     assert summary.run_id in run["summary_json"]
     assert ("market-sync", "skipped") in [(row["task"], row["status"]) for row in tasks]
+    assert progress[-1].stage == "组合与报告"
+    assert progress[-1].completed == progress[-1].total == 5
+    assert any(item.stage == "同步行情" and item.symbol == "CN:601318" for item in progress)
+    assert any(item.stage == "个股分析" and item.symbol == "CN:601318" for item in progress)
 
 
 def test_organize_reports_moves_known_types_without_overwrite(tmp_path) -> None:

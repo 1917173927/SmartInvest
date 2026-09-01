@@ -100,9 +100,29 @@
 ### SOP 3：每日盘后全流程分析（18:30+）
 
 1. **自动触发**：macOS 守护进程于 18:30 自动执行 `stock auto`。
-2. **执行链条**：
+2. **手动启动与 CLI 选择**：
+   ```bash
+   # 菜单模式：选择全部/部分标的，以及按配置/快速/完整模式
+   uv run stock auto --interactive
+
+   # 直接按 stock-analysis.toml 顺序轮流分析全部配置标的
+   uv run stock auto
+
+   # 非交互地只分析指定标的；--symbol 可重复
+   uv run stock auto --symbol CN:601318 --symbol CN:601398
+
+   # 快速模式：保留确定性分析，关闭 LLM 与 Chronos
+   uv run stock auto --no-llm --no-chronos
+   ```
+   在交互终端中默认显示“预检 → 逐只同步 → 回执 → 校准状态 → 逐只分析 → 组合报告”
+   总进度条；可用 `--progress` 强制显示或 `--no-progress` 关闭。
+3. **全部轮流分析口径**：
+   - 默认读取 `stock-analysis.toml` 的全部 `[assets]`，按配置顺序逐只执行，不并行争抢数据库、模型内存或行情连接；
+   - 单只失败会记录原因并继续下一只，不会中断整个批次；
+   - 高成本 walk-forward 校准受每次运行名额和时间上限约束并按日期轮换，但每只同步成功的标的仍会完成当次多周期分析。
+4. **执行链条**：
    `依赖检查 → 行情/分红增量同步 → 新闻与宏观刷新 → 到期回执自动核验 → 条件校准 → 多周期模型推演 → 图表渲染与 Obsidian 研报整理`
-3. **成果查阅**：
+5. **成果查阅**：
    - 打开 Obsidian 浏览 `00-交易总览.md` 与 `06-自动分析/最新摘要.md` 查看今日多周期冲突决策卡与行业暴露。
 
 ### SOP 4：新增标的、策略回测与周度复盘
@@ -132,7 +152,7 @@
 | `stock dash`             | 📊**终端决策看板**：基于本地日线数据呈现全资产四周期信号、数据日期与质量                  |
 | `stock scenario SYMBOL`  | 🔬**What-If 情景推演**：模拟盈利预期调整与安全边际变化对买入价的影响                     |
 | `stock add SYMBOL`       | ➕**向导式添加标的**：设定行业、组合角色（core/satellite）、估值模型与基准倍数           |
-| `stock auto`             | ⚡**一键全流程自动批处理**：无交互执行同步、研报生成、回执核对与图表更新                 |
+| `stock auto`             | ⚡**全流程自动分析**：默认轮流分析全部配置标的并显示进度；`-i` 菜单选择，`-s` 指定标的 |
 | `stock analyze SYMBOL`   | 📝**单标的多周期分析**：`--horizon short\|medium\|long\|value\|all`                        |
 | `stock evaluate`         | 🔍**到期回执核验与回测**：`--backtest SYMBOL --horizon-days 20` 执行严格样本外盲测     |
 | `stock portfolio`        | 💼**组合风控硬约束检查**：核查单股上限、行业集中度、现金底线与组合回撤                   |
@@ -219,6 +239,9 @@ uv run python scripts/install_launchd.py
 
 * **`com.stockanalysis.morning.plist`**：每个工作日 **09:00** 自动计算全标的挂单网格并推送桌面通知；
 * **`com.stockanalysis.daily.plist`**：每日 **18:30** 自动执行盘后全流程数据同步与深度模型计算。
+
+launchd 使用无交互入口，不显示终端进度条，也不会等待菜单输入；运行明细写入
+`.stock-analysis/auto.log` 与 `06-自动分析/运行日志/`。
 
 ---
 

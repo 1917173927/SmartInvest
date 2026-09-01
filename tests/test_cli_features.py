@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from typer.testing import CliRunner
 
+from stock_analysis.automation import AutomationSummary
 from stock_analysis.cli import _quote_freshness, app
 from stock_analysis.data import Bar, Database, DataQuality, FundamentalRecord, MarketQuote
 
@@ -19,6 +20,47 @@ def test_quote_freshness_rejects_stale_public_snapshot() -> None:
 
     assert not fresh
     assert warning is not None and "超过 15 分钟" in warning
+
+
+def test_cli_auto_interactive_selects_symbols_and_quick_mode(tmp_path, monkeypatch) -> None:
+    (tmp_path / "stock-analysis.toml").write_text(
+        """[assets."CN:601398"]
+name = "工商银行"
+
+[assets."CN:601318"]
+name = "中国平安"
+
+[assets."CN:000933"]
+name = "神火股份"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("STOCK_ANALYSIS_HOME", str(tmp_path))
+    captured = {}
+
+    def fake_run(_config, **kwargs):
+        captured.update(kwargs)
+        selected = kwargs["symbols"]
+        return AutomationSummary(
+            as_of=date(2026, 9, 1),
+            symbols=selected,
+            succeeded=list(selected),
+        )
+
+    monkeypatch.setattr("stock_analysis.cli.run_automation", fake_run)
+
+    result = runner.invoke(
+        app,
+        ["auto", "--interactive", "--no-progress"],
+        input="2\n1,3\n2\n",
+        env={"COLUMNS": "160"},
+    )
+
+    assert result.exit_code == 0
+    assert captured["symbols"] == ["CN:601398", "CN:000933"]
+    assert captured["use_llm"] is False
+    assert captured["use_chronos"] is False
+    assert "自动分析完成：成功 2" in result.output
 
 
 def test_cli_add_command_dry_run(tmp_path, monkeypatch) -> None:

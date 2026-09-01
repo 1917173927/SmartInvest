@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from importlib.util import find_spec
@@ -74,6 +75,18 @@ class AutomationSummary:
     calibration_progress: dict[str, dict[str, dict[str, object]]] = field(default_factory=dict)
     tasks: list[dict[str, str]] = field(default_factory=list)
     portfolio_report: Path | None = None
+
+
+@dataclass(frozen=True)
+class AutomationProgress:
+    completed: int
+    total: int
+    stage: str
+    symbol: str | None = None
+    detail: str = ""
+
+
+ProgressCallback = Callable[[AutomationProgress], None]
 
 
 def _task(
@@ -247,12 +260,42 @@ def run_automation(
     symbols: list[str] | None = None,
     use_llm: bool | None = None,
     use_chronos: bool | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> AutomationSummary:
     """Run the unattended sync → evaluate → analyze → portfolio workflow."""
     automation = config.section("automation")
     analysis_date = as_of or date.today()
-    selected = symbols or configured_symbols(config)
+    selected = configured_symbols(config) if symbols is None else symbols
     summary = AutomationSummary(as_of=analysis_date, symbols=selected)
+    progress_total = len(selected) * 2 + 3
+    progress_completed = 0
+
+    def report_progress(
+        stage: str,
+        *,
+        symbol: str | None = None,
+        detail: str = "",
+        advance: bool = False,
+    ) -> None:
+        nonlocal progress_completed
+        if advance:
+            progress_completed = min(progress_completed + 1, progress_total)
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(
+                AutomationProgress(
+                    completed=progress_completed,
+                    total=progress_total,
+                    stage=stage,
+                    symbol=symbol,
+                    detail=detail,
+                )
+            )
+        except Exception:
+            LOGGER.exception("自动化进度回调失败")
+
+    report_progress("准备", detail=f"共 {len(selected)} 个标的")
     llm_enabled = (
         _env_bool("STOCK_AUTO_USE_LLM", bool(automation.get("use_llm", True)))
         if use_llm is None
@@ -302,11 +345,13 @@ def run_automation(
             status="failed" if missing else "executed",
             reason="缺少依赖: " + ", ".join(missing) if missing else "核心依赖与数据库可用",
         )
+        report_progress("环境预检", detail="完成", advance=True)
         # Sync all symbols before evaluating receipts. This lets today's
         # calibration affect today's reports instead of waiting for the next run.
         sync_warnings_by_symbol: dict[str, list[str]] = {}
         sync_ready: list[str] = []
         for symbol in selected:
+            report_progress("同步行情", symbol=symbol, detail="正在检查数据")
             try:
                 sync_warnings: list[str] = []
                 if analysis_date >= date.today() - timedelta(days=2):
@@ -354,6 +399,8 @@ def run_automation(
                     symbol=symbol,
                 )
                 LOGGER.exception("自动同步失败: %s", symbol)
+            finally:
+                report_progress("同步行情", symbol=symbol, detail="完成", advance=True)
 
         summary.evaluated_receipts = len(evaluate_open_receipts(database))
         _task(
@@ -362,11 +409,13 @@ def run_automation(
             status="executed",
             reason=f"核对 {summary.evaluated_receipts} 条到期回执",
         )
+        report_progress("回执核对", detail=f"完成 {summary.evaluated_receipts} 条", advance=True)
 
         # Repair historical ex-rights gaps independently from market-data sync.
         # This path is cheap compared with re-downloading bars and is safe to
         # repeat because corporate_actions uses an idempotent upsert key.
         for symbol in sync_ready:
+            report_progress("公司行动检查", symbol=symbol, detail="检查除权除息缺口")
             bars = database.load_bars(symbol, analysis_date)
             if bars.empty:
                 continue
@@ -428,6 +477,11 @@ def run_automation(
                     continue
                 for raw_days in configured_horizons:
                     days = int(raw_days)
+                    report_progress(
+                        "滚动校准",
+                        symbol=symbol,
+                        detail=f"检查 {days} 日期限",
+                    )
                     state = calibration_weights(database, symbol, days, config)
                     summary.calibration_progress.setdefault(symbol, {})[str(days)] = {
                         "samples": state.samples,
@@ -543,7 +597,12 @@ def run_automation(
                 reason="Chronos 未启用，保留随机游走基线",
             )
 
+        for symbol in selected:
+            if symbol not in sync_ready:
+                report_progress("个股分析", symbol=symbol, detail="同步失败，已跳过", advance=True)
+
         for symbol in sync_ready:
+            report_progress("个股分析", symbol=symbol, detail="正在生成多周期结论")
             try:
                 sync_warnings = sync_warnings_by_symbol[symbol]
                 context = refresh_context(
@@ -707,6 +766,8 @@ def run_automation(
             except Exception as exc:  # one bad provider/symbol must not stop the batch
                 summary.failed[symbol] = str(exc)
                 LOGGER.exception("自动分析失败: %s", symbol)
+            finally:
+                report_progress("个股分析", symbol=symbol, detail="完成", advance=True)
 
         try:
             snapshot = latest_portfolio_snapshot(config)
@@ -731,6 +792,7 @@ def run_automation(
             tasks=summary.tasks,
             summary=summary_json(summary),
         )
+        report_progress("组合与报告", detail="全部完成", advance=True)
     return summary
 
 
