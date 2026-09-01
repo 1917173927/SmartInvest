@@ -337,6 +337,8 @@ def run_automation(
             "akshare": find_spec("akshare") is not None,
             "yfinance": find_spec("yfinance") is not None,
             "chronos": (not chronos_enabled) or Chronos2Forecaster.installed(),
+            "matplotlib": (not bool(config.section("charts").get("enabled", True)))
+            or find_spec("matplotlib") is not None,
         }
         missing = [name for name, available in dependencies.items() if not available]
         _task(

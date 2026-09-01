@@ -1113,7 +1113,7 @@ class AkShareProvider:
 
     def fetch_bars(self, instrument: Instrument, start: date, end: date) -> list[Bar]:
         if not self.available():
-            raise RuntimeError("未安装 AKShare；请运行 uv sync --extra data")
+            raise RuntimeError("未安装 AKShare；请运行 uv sync")
         import akshare as ak
 
         start_text = start.strftime("%Y%m%d")
@@ -1175,7 +1175,7 @@ class AkShareProvider:
         if instrument.market is not Market.CN:
             raise ValueError("AKShare 单证券报价当前只支持 A 股")
         if not self.available():
-            raise RuntimeError("未安装 AKShare；请运行 uv sync --extra data")
+            raise RuntimeError("未安装 AKShare；请运行 uv sync")
         import akshare as ak
 
         frame = ak.stock_bid_ask_em(symbol=instrument.code)
@@ -1345,7 +1345,7 @@ class YFinanceProvider:
 
     def _history(self, instrument: Instrument, start: date, end: date) -> pd.DataFrame:
         if not self.available():
-            raise RuntimeError("未安装 yfinance；请运行 uv sync --extra data")
+            raise RuntimeError("未安装 yfinance；请运行 uv sync")
         import yfinance as yf
 
         ticker = yf.Ticker(instrument.yahoo_symbol)
@@ -1388,7 +1388,7 @@ class YFinanceProvider:
         if not self.supports(instrument):
             raise ValueError("yfinance 不支持该证券")
         if not self.available():
-            raise RuntimeError("未安装 yfinance；请运行 uv sync --extra data")
+            raise RuntimeError("未安装 yfinance；请运行 uv sync")
         import yfinance as yf
 
         ticker = yf.Ticker(instrument.yahoo_symbol)

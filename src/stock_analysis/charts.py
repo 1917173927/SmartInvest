@@ -22,7 +22,7 @@ def render_stock_chart(
     sessions: int = 180,
 ) -> Path:
     if not available():
-        raise RuntimeError("未安装图表依赖；请运行 uv sync --extra charts")
+        raise RuntimeError("未安装图表依赖；请运行 uv sync")
     if frame.empty:
         raise ValueError("没有可绘制行情")
     import matplotlib
@@ -159,7 +159,7 @@ def render_probability_chart(package: AnalysisPackage, output_path: Path) -> Pat
     is a deterministic price path.
     """
     if not available():
-        raise RuntimeError("未安装图表依赖；请运行 uv sync --extra charts")
+        raise RuntimeError("未安装图表依赖；请运行 uv sync")
     if not package.forecasts:
         raise ValueError("没有可绘制概率预测")
     import matplotlib

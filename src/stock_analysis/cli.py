@@ -331,6 +331,32 @@ def doctor() -> None:
     """检查配置、数据库、数据适配器、LLM 和 Chronos 状态。"""
     config, database = _context()
     chronos_installed = Chronos2Forecaster.installed()
+    llm_configured = bool(os.getenv("OPENAI_API_KEY") and os.getenv("STOCK_ANALYSIS_MODEL"))
+    latest_llm_tasks = database.connection.execute(
+        """
+        SELECT task.status, task.reason
+        FROM automation_tasks AS task
+        WHERE task.task = 'research-llm'
+          AND task.run_id = (
+              SELECT id FROM automation_runs ORDER BY started_at DESC LIMIT 1
+          )
+        ORDER BY task.sequence
+        """
+    ).fetchall()
+    latest_llm_failures = [row for row in latest_llm_tasks if row["status"] == "failed"]
+    if not llm_configured:
+        llm_status = "OPTIONAL"
+        llm_detail = "缺失时保留证据检索，不生成事件因子"
+    elif latest_llm_failures:
+        llm_status = "WARN"
+        reason = " ".join(str(latest_llm_failures[0]["reason"]).splitlines())
+        llm_detail = f"最近自动运行有 {len(latest_llm_failures)} 项失败：{reason}"
+    elif any(row["status"] == "executed" for row in latest_llm_tasks):
+        llm_status = "OK"
+        llm_detail = "最近自动运行已完成 LLM 研究步骤"
+    else:
+        llm_status = "CONFIGURED"
+        llm_detail = "凭据与模型已配置，尚无成功调用记录"
     embedding_configured = bool(
         (os.getenv("STOCK_ANALYSIS_EMBEDDING_MODEL") or os.getenv("GEMINI_EMBEDDING_MODEL"))
         and (
@@ -353,34 +379,32 @@ def doctor() -> None:
         ("SQLite", "OK", str(database.path)),
         (
             "AKShare",
-            "OK" if AkShareProvider.available() else "OPTIONAL",
-            "A/H/基金主数据源；uv sync --extra data",
+            "OK" if AkShareProvider.available() else "MISSING",
+            "A/H/基金主数据源；运行 uv sync 恢复默认依赖",
         ),
         (
             "yfinance",
-            "OK" if YFinanceProvider.available() else "OPTIONAL",
-            "港美股备用源；uv sync --extra data",
+            "OK" if YFinanceProvider.available() else "MISSING",
+            "港美股备用源；运行 uv sync 恢复默认依赖",
         ),
         (
             "图表",
-            "OK" if charts_available() else "OPTIONAL",
-            "K线/MACD/RSI；uv sync --extra charts",
+            "OK" if charts_available() else "MISSING",
+            "K线/MACD/RSI；运行 uv sync 恢复默认依赖",
         ),
         (
             "Chronos-2",
-            "OK" if chronos_installed else "OPTIONAL",
+            "OK" if chronos_installed else "MISSING",
             (
                 "已安装；首次运行下载后本地缓存"
                 if chronos_installed
-                else "未安装或不可用时自动使用随机游走基线"
+                else "运行 uv sync 恢复默认依赖；不可用时降级为随机游走基线"
             ),
         ),
         (
             "LLM",
-            "OK"
-            if os.getenv("OPENAI_API_KEY") and os.getenv("STOCK_ANALYSIS_MODEL")
-            else "OPTIONAL",
-            "缺失时保留证据检索，不生成事件因子",
+            llm_status,
+            llm_detail,
         ),
         (
             "嵌入模型",

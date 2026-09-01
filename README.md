@@ -178,12 +178,17 @@ git clone git@github.com:1917173927/SmartInvest.git
 cd SmartInvest
 cp stock-analysis.example.toml stock-analysis.toml
 
-# 安装完整依赖（数据源、Chronos 时序模型、绘图引擎与开发套件）
-uv sync --extra data --extra forecast --extra charts --extra dev
+# 默认安装完整运行依赖：数据源、Chronos 时序模型与绘图引擎
+# --extra dev 仅增加 Ruff、Pytest 等开发工具
+uv sync --extra dev
 
 # 验证运行环境
 uv run stock doctor
 ```
+
+此后运行 `uv run stock auto` 时，uv 会先核对锁文件与默认依赖；行情、Chronos 和图表组件
+不再依赖额外的 `--extra` 参数。旧的 `data`、`forecast`、`charts` extra 名称仍保留兼容。
+LLM 还需要 `.env` 中有效的 API 凭据；Python 依赖安装无法修复接口返回的 401。
 
 ### 2. macOS 盘中行情：Longbridge OpenAPI
 

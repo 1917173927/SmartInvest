@@ -1562,46 +1562,40 @@ name = "personal-stock-analysis"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "akshare" },
+    { name = "chronos-forecasting" },
     { name = "httpx" },
+    { name = "matplotlib" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pydantic" },
+    { name = "torch" },
     { name = "typer" },
+    { name = "yfinance" },
 ]
 
 [package.optional-dependencies]
-charts = [
-    { name = "matplotlib" },
-]
-data = [
-    { name = "akshare" },
-    { name = "yfinance" },
-]
 dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
-forecast = [
-    { name = "chronos-forecasting" },
-    { name = "torch" },
-]
 
 [package.metadata]
 requires-dist = [
-    { name = "akshare", marker = "extra == 'data'", specifier = ">=1.17" },
-    { name = "chronos-forecasting", marker = "extra == 'forecast'", specifier = ">=2.0,<3" },
+    { name = "akshare", specifier = ">=1.17" },
+    { name = "chronos-forecasting", specifier = ">=2.0,<3" },
     { name = "httpx", specifier = ">=0.27,<1" },
-    { name = "matplotlib", marker = "extra == 'charts'", specifier = ">=3.9,<4" },
+    { name = "matplotlib", specifier = ">=3.9,<4" },
     { name = "numpy", specifier = ">=2.0,<3" },
     { name = "pandas", specifier = ">=2.2,<3" },
     { name = "pydantic", specifier = ">=2.9,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3,<9" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6,<7" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9,<1" },
-    { name = "torch", marker = "extra == 'forecast'", specifier = ">=2.5,<3" },
+    { name = "torch", specifier = ">=2.5,<3" },
     { name = "typer", specifier = ">=0.15,<1" },
-    { name = "yfinance", marker = "extra == 'data'", specifier = ">=0.2.54" },
+    { name = "yfinance", specifier = ">=0.2.54" },
 ]
 provides-extras = ["data", "forecast", "charts", "dev"]
 

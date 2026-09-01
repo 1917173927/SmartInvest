@@ -12,9 +12,7 @@ def main() -> int:
     project = Path(__file__).resolve().parents[1]
     python = project / ".venv" / "bin" / "python"
     if not python.exists():
-        raise SystemExit(
-            "缺少 .venv；请先运行 uv sync --extra data --extra forecast --extra charts"
-        )
+        raise SystemExit("缺少 .venv；请先运行 uv sync")
 
     launch_agents = Path.home() / "Library" / "LaunchAgents"
     launch_agents.mkdir(parents=True, exist_ok=True)
