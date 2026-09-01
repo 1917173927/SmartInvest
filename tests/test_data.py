@@ -17,6 +17,7 @@ from stock_analysis.data import (
     Instrument,
     Market,
     MarketQuote,
+    TencentQuoteProvider,
     YFinanceProvider,
     _normalize_provider_metric,
     coverage_warnings,
@@ -149,6 +150,28 @@ def test_akshare_fetches_single_security_quote(monkeypatch) -> None:
 
     assert quote.price == 57.10
     assert quote.source == "akshare-eastmoney-quote"
+
+
+def test_tencent_fetches_timestamped_quote(monkeypatch) -> None:
+    class FakeResponse:
+        content = (
+            'v_sh601318="1~中国平安~601318~57.10~55.82~55.78~694812~'
+            "423945~270868~57.09~173~57.08~284~57.07~13~57.06~254~57.05~57~"
+            "57.10~46~57.11~22~57.12~91~57.14~13~57.15~20~~20260901120539~"
+            '1.28~2.29~57.36~55.41~57.10/694812/3944962924~694812~394496~0.65~"'
+        ).encode("gb18030")
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    monkeypatch.setattr("stock_analysis.data.httpx.get", lambda *args, **kwargs: FakeResponse())
+
+    quote = TencentQuoteProvider().fetch_quote(Instrument.parse("CN:601318"))
+
+    assert quote.price == 57.10
+    assert quote.source == "tencent-quote"
+    assert quote.fetched_at.isoformat() == "2026-09-01T12:05:39+08:00"
 
 
 def test_latest_quote_falls_back_to_next_provider() -> None:

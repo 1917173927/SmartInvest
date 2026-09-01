@@ -10,7 +10,7 @@ import tomllib
 from collections.abc import Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from enum import StrEnum
 from importlib.util import find_spec
 from pathlib import Path
@@ -1535,6 +1535,53 @@ class SecEdgarProvider:
         return records
 
 
+def _parse_tencent_quote(text: str, instrument: Instrument) -> MarketQuote:
+    """Parse Tencent's tilde-delimited quote response."""
+    marker, _, payload = text.partition("=")
+    if not marker.startswith("v_"):
+        raise RuntimeError("腾讯行情响应缺少证券标识")
+    fields = payload.strip().strip(';"').split("~")
+    if len(fields) < 31:
+        raise RuntimeError("腾讯行情响应字段不足")
+    price = _number(fields[3], -1)
+    if price <= 0:
+        raise RuntimeError("腾讯行情响应缺少有效最新价")
+    try:
+        fetched_at = datetime.strptime(fields[30], "%Y%m%d%H%M%S").replace(
+            tzinfo=timezone(timedelta(hours=8))
+        )
+    except ValueError:
+        fetched_at = utc_now()
+    return MarketQuote(
+        symbol=instrument.canonical,
+        price=price,
+        currency=instrument.currency,
+        source="tencent-quote",
+        fetched_at=fetched_at,
+        quality=DataQuality.B,
+    )
+
+
+class TencentQuoteProvider:
+    name = "tencent"
+
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.market is Market.CN
+
+    def fetch_quote(self, instrument: Instrument) -> MarketQuote:
+        if not self.supports(instrument):
+            raise ValueError("腾讯行情当前只支持 A 股")
+        prefix = "sh" if instrument.code.startswith(("5", "6", "9")) else "sz"
+        response = httpx.get(
+            f"https://qt.gtimg.cn/q={prefix}{instrument.code}",
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.qq.com/"},
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        text = response.content.decode("gb18030", errors="replace")
+        return _parse_tencent_quote(text, instrument)
+
+
 def provider_order(instrument: Instrument) -> list[MarketDataProvider]:
     akshare = AkShareProvider()
     yahoo = YFinanceProvider()
@@ -1545,12 +1592,20 @@ def provider_order(instrument: Instrument) -> list[MarketDataProvider]:
     return [yahoo]
 
 
+def quote_provider_order(instrument: Instrument) -> list[object]:
+    if instrument.market is Market.CN:
+        return [TencentQuoteProvider(), AkShareProvider(), YFinanceProvider()]
+    if instrument.market is Market.HK:
+        return [AkShareProvider(), YFinanceProvider()]
+    return [YFinanceProvider()]
+
+
 def fetch_latest_quote(
     instrument: Instrument,
     providers: Sequence[object] | None = None,
 ) -> tuple[MarketQuote | None, list[str]]:
     """Return a best-effort execution quote and transparent provider warnings."""
-    candidates = list(providers) if providers is not None else provider_order(instrument)
+    candidates = list(providers) if providers is not None else quote_provider_order(instrument)
     warnings: list[str] = []
     for provider in candidates:
         fetch_quote = getattr(provider, "fetch_quote", None)

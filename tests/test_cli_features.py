@@ -1,15 +1,24 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import numpy as np
 import pandas as pd
 from typer.testing import CliRunner
 
-from stock_analysis.cli import app
+from stock_analysis.cli import _quote_freshness, app
 from stock_analysis.data import Bar, Database, DataQuality, FundamentalRecord
 
 runner = CliRunner()
+
+
+def test_quote_freshness_rejects_stale_public_snapshot() -> None:
+    fresh, warning = _quote_freshness(
+        datetime.now(UTC) - timedelta(minutes=16), max_age=timedelta(minutes=15)
+    )
+
+    assert not fresh
+    assert warning is not None and "超过 15 分钟" in warning
 
 
 def test_cli_add_command_dry_run(tmp_path, monkeypatch) -> None:

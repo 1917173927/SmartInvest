@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -183,6 +183,20 @@ def _execution_guidance(
         "[bold red]当前动作：价格已到第三档深跌区。[/bold red] 先排除基本面或事件性风险；"
         f"仅在前两档已按计划执行且总仓位未超限时，才考虑不高于 {third.target_price:.2f} "
         f"的最多 {third.shares} 股限价单。"
+    )
+
+
+def _quote_freshness(
+    quote_fetched_at: datetime, *, max_age: timedelta = timedelta(minutes=15)
+) -> tuple[bool, str | None]:
+    age = datetime.now(UTC) - quote_fetched_at.astimezone(UTC)
+    if age <= max_age:
+        return True, None
+    minutes = max(1, int(age.total_seconds() // 60))
+    return (
+        False,
+        f"报价时间距现在约 {minutes} 分钟，超过 "
+        f"{int(max_age.total_seconds() // 60)} 分钟新鲜度门槛",
     )
 
 
@@ -1188,6 +1202,9 @@ def size_command(
             current_price = quote.price
             fetched_at = quote.fetched_at.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
             price_source = f"{quote.source}，获取于 {fetched_at}（可能延迟）"
+            quote_actionable, freshness_warning = _quote_freshness(quote.fetched_at)
+            if freshness_warning:
+                quote_warnings.append(freshness_warning)
         else:
             current_price = reference_price
             price_source = f"历史日线缓存，交易日 {reference_date.isoformat()}"
