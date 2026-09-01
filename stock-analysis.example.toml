@@ -72,5 +72,5 @@ name = "中国平安"
 sector = "金融"
 role = "core"
 valuation_model = "insurer"
-fair_pe = 9.0
-fair_pb = 1.10
+fair_pe = 10.5
+fair_pb = 1.25

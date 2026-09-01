@@ -506,7 +506,7 @@ class BaseValuationStrategy:
 
 class BankValuationStrategy(BaseValuationStrategy):
     name = "bank"
-    default_fair_pe = 7.0
+    default_fair_pe = 6.8
     default_fair_pb = 0.75
     pb_multiplier = 1.4
     fair_width = 0.20
@@ -515,8 +515,8 @@ class BankValuationStrategy(BaseValuationStrategy):
 
 class InsurerValuationStrategy(BaseValuationStrategy):
     name = "insurer"
-    default_fair_pe = 9.0
-    default_fair_pb = 1.10
+    default_fair_pe = 10.5
+    default_fair_pb = 1.25
     pb_multiplier = 1.4
     fair_width = 0.20
     safety_margin = 0.20
@@ -524,11 +524,11 @@ class InsurerValuationStrategy(BaseValuationStrategy):
 
 class CyclicalValuationStrategy(BaseValuationStrategy):
     name = "cyclical"
-    default_fair_pe = 10.0
-    default_fair_pb = 1.50
+    default_fair_pe = 14.0
+    default_fair_pb = 1.80
     pb_multiplier = 1.0
-    fair_width = 0.30
-    safety_margin = 0.30
+    fair_width = 0.25
+    safety_margin = 0.25
 
 
 class FundValuationStrategy(BaseValuationStrategy):
